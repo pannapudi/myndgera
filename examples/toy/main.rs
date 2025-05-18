@@ -3,13 +3,13 @@ use ash::{
     prelude::VkResult,
     vk::{self, Extent2D},
 };
-use glam::{vec2, Vec2, Vec3};
+use glam::{Vec2, Vec3, vec2};
 use myndgera::{
+    App, AppState, Framework, RenderContext,
     vulkan::{
         FragmentOutputDesc, FragmentShaderDesc, FrameGuard, RenderHandle, VertexInputDesc,
         VertexShaderDesc,
     },
-    App, AppState, Framework, RenderContext,
 };
 use std::error::Error;
 use winit::event_loop::EventLoop;
