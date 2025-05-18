@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use ash::{prelude::VkResult, vk};
 use either::Either;
 use glam::{vec2, vec3};
@@ -329,7 +329,6 @@ impl<F: Framework> AppInit<F> {
 
         self.ctx.swapchain.submit_image(frame)?;
 
-        self.ctx.swapchain.tick_frame();
         self.state.frame = self.state.frame.wrapping_add(1);
         Ok(())
     }
@@ -506,11 +505,11 @@ impl<F: Framework> ApplicationHandler<UserEvent> for AppInit<F> {
                     Ok(()) => {
                         const ESC: &str = "\x1B[";
                         const RESET: &str = "\x1B[0m";
-                        eprint!("\r{}42m{}K{}\r", ESC, ESC, RESET);
+                        eprint!("\r{ESC}42m{ESC}K{RESET}\r");
                         std::io::stdout().flush().unwrap();
                         std::thread::spawn(|| {
                             std::thread::sleep(std::time::Duration::from_millis(50));
-                            eprint!("\r{}40m{}K{}\r", ESC, ESC, RESET);
+                            eprint!("\r{ESC}40m{ESC}K{RESET}\r");
                             std::io::stdout().flush().unwrap();
                         });
                     }
@@ -524,6 +523,7 @@ impl<F: Framework> ApplicationHandler<UserEvent> for AppInit<F> {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum App<F> {
     Uninitialized { proxy: EventLoopProxy<UserEvent> },
     Init(AppInit<F>),

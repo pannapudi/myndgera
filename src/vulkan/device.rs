@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use gpu_allocator::{
-    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc},
     MemoryLocation,
+    vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc},
 };
 use parking_lot::Mutex;
 use std::{collections::HashSet, marker::PhantomData};

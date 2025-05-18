@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::{Watcher, SHADER_FOLDER};
+use crate::{SHADER_FOLDER, Watcher};
 use anyhow::{Context, Result};
 use shaderc::{CompilationArtifact, IncludeType, ShaderKind};
 
@@ -56,8 +56,7 @@ impl ShaderCompiler {
                     })
                 }
                 Err(err) => Err(format!(
-                    "Failed to resolve include to {} in {} (was looking for {:?}): {}",
-                    name, source_file, path, err
+                    "Failed to resolve include to {name} in {source_file} (was looking for {path:?}): {err}"
                 )),
             }
         });

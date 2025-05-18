@@ -1,7 +1,7 @@
 use std::ffi::CStr;
 
 use anyhow::Result;
-use ash::{ext, khr, vk, Entry};
+use ash::{Entry, ext, khr, vk};
 use tracing::{debug, error, info, warn};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
@@ -15,12 +15,12 @@ unsafe extern "system" fn vulkan_debug_callback(
 ) -> vk::Bool32 {
     use vk::DebugUtilsMessageSeverityFlagsEXT as Flag;
 
-    let message = CStr::from_ptr((*p_callback_data).p_message);
+    let message = unsafe { CStr::from_ptr((*p_callback_data).p_message) }.to_string_lossy();
     match flag {
-        Flag::VERBOSE => debug!("{:?} - {:?}", typ, message),
-        Flag::INFO => info!("{:?} - {:?}", typ, message),
-        Flag::WARNING => warn!("{:?} - {:?}", typ, message),
-        _ => error!("{:?} - {:?}", typ, message),
+        Flag::VERBOSE => debug!("{:?} - {}", typ, message),
+        Flag::INFO => info!("{:?} - {}", typ, message),
+        Flag::WARNING => warn!("{:?} - {}", typ, message),
+        _ => error!("{:?} - {}", typ, message),
     }
     vk::FALSE
 }
@@ -89,7 +89,6 @@ impl Instance {
             )
             .message_type(
                 vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING
                     | vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
                     | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )

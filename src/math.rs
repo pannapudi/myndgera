@@ -1,4 +1,4 @@
-use glam::{vec3, Mat4, Vec3, Vec3Swizzles, Vec4};
+use glam::{Mat4, Vec3, Vec3Swizzles, Vec4, vec3};
 
 #[allow(non_upper_case_globals)]
 pub const sin: fn(f32) -> f32 = f32::sin;

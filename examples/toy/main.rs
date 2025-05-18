@@ -87,7 +87,6 @@ impl Framework for Trig {
         frame.begin_rendering(
             &ctx.swapchain.images[frame.image_idx],
             &ctx.swapchain.views[frame.image_idx],
-            vk::ImageLayout::GENERAL,
             vk::AttachmentLoadOp::CLEAR,
             [1., 1., 1., 1.],
         );

@@ -2,10 +2,11 @@ use anyhow::Result;
 use ash::{prelude::VkResult, vk};
 use bytemuck::{Pod, Zeroable};
 use dolly::prelude::YawPitch;
-use glam::{vec3, Mat4, Vec2, Vec3, Vec4};
+use glam::{Mat4, Vec2, Vec3, Vec4, vec3};
 use gpu_allocator::MemoryLocation;
 use myndgera::{
-    bytes_of, dispatch_optimal,
+    App, AppState, Camera, ComputeHandle, Device, FIXED_TIME_STEP, Framework, GpuBuffer,
+    KeyboardMap, RenderContext, bytes_of, dispatch_optimal,
     math::{cos, erot, hash13, look_at, sin, smooth_floor},
     passes::{
         bloom::{Bloom, BloomParams},
@@ -15,8 +16,6 @@ use myndgera::{
         Buffer, FragmentOutputDesc, FragmentShaderDesc, FrameGuard, ImageHandle, RenderHandle,
         ScreenRelation, VertexInputDesc, VertexShaderDesc, ViewTarget,
     },
-    App, AppState, Camera, ComputeHandle, Device, Framework, GpuBuffer, KeyboardMap, RenderContext,
-    FIXED_TIME_STEP,
 };
 use std::{error::Error, f32::consts::PI, sync::Arc};
 use winit::event_loop::EventLoop;
@@ -406,7 +405,6 @@ impl Framework for Trig {
             frame.begin_rendering(
                 &ctx.swapchain.images[frame.image_idx],
                 &ctx.swapchain.views[frame.image_idx],
-                vk::ImageLayout::GENERAL,
                 vk::AttachmentLoadOp::DONT_CARE,
                 [0., 0.025, 0.025, 1.0],
             );

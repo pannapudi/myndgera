@@ -48,14 +48,13 @@ impl FrameGuard {
         &self,
         image: &vk::Image,
         view: &vk::ImageView,
-        current_layout: vk::ImageLayout,
         load_op: vk::AttachmentLoadOp,
         color: [f32; 4],
     ) {
         self.device.image_transition(
             self.command_buffer(),
             image,
-            current_layout,
+            vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
 

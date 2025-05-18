@@ -7,7 +7,7 @@ use ash::{
 };
 use tracing::debug;
 
-use super::{Device, Frame, FrameGuard, ImageDimensions, Surface, BASE_IMAGE_RANGE};
+use super::{BASE_IMAGE_RANGE, Device, Frame, FrameGuard, ImageDimensions, Surface};
 
 pub struct Swapchain {
     pub format: vk::SurfaceFormatKHR,
@@ -18,6 +18,7 @@ pub struct Swapchain {
     pub images: Vec<vk::Image>,
     pub loader: khr::swapchain::Device,
     pub inner: vk::SwapchainKHR,
+    reclaimed_semaphores: Vec<vk::Semaphore>,
     current_frame: usize,
     device: Arc<Device>,
 }
@@ -84,9 +85,11 @@ impl Swapchain {
         let queue_family_index = [device.main_queue_family_idx];
 
         // Swapchain
-        assert!(capabilities
-            .supported_composite_alpha
-            .contains(vk::CompositeAlphaFlagsKHR::OPAQUE));
+        assert!(
+            capabilities
+                .supported_composite_alpha
+                .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        );
         let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.inner)
             .image_format(format.format)
@@ -139,11 +142,8 @@ impl Swapchain {
             images,
             views,
             current_frame: 0,
+            reclaimed_semaphores: vec![],
         })
-    }
-
-    pub fn tick_frame(&mut self) {
-        self.current_frame = (self.current_frame + 1) % self.images.len();
     }
 
     pub fn recreate(&mut self, surface: &Surface, width: u32, height: u32) -> VkResult<()> {
@@ -226,31 +226,38 @@ impl Swapchain {
     }
 
     pub fn acquire_next_image(&mut self) -> VkResult<FrameGuard> {
-        let Some(frame) = self.frames[self.current_frame].take() else {
-            return Err(vk::Result::ERROR_UNKNOWN);
-        };
-
+        let acquire_semaphore = self
+            .reclaimed_semaphores
+            .pop()
+            .map_or_else(|| self.device.create_semaphore(), Ok)?;
         let one_second = Duration::from_secs(1).as_nanos() as u64;
-
-        self.device
-            .wait_for_fences(&[frame.present_finished], true, one_second)?;
 
         let image_idx = match unsafe {
             self.loader.acquire_next_image(
                 self.inner,
                 one_second,
-                frame.image_available_semaphore,
+                acquire_semaphore,
                 vk::Fence::null(),
             )
         } {
             Ok((idx, false)) => idx as usize,
             Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                self.frames[self.current_frame] = Some(frame);
+                self.reclaimed_semaphores.push(acquire_semaphore);
                 return VkResult::Err(vk::Result::ERROR_OUT_OF_DATE_KHR);
             }
             Err(e) => return Err(e),
         };
+        self.current_frame = image_idx;
+        let Some(mut frame) = self.frames[image_idx].take() else {
+            return Err(vk::Result::ERROR_UNKNOWN);
+        };
+        self.reclaimed_semaphores.push(std::mem::replace(
+            &mut frame.image_available_semaphore,
+            acquire_semaphore,
+        ));
 
+        self.device
+            .wait_for_fences(&[frame.present_finished], true, one_second)?;
         unsafe { self.device.reset_fences(&[frame.present_finished])? };
 
         let command_buffer = self.device.start_command_buffer()?;
@@ -329,8 +336,11 @@ impl Drop for Swapchain {
                 .iter_mut()
                 .filter_map(|f| f.as_mut())
                 .for_each(|f| f.destroy(&self.device));
-            self.views.iter().for_each(|view| {
-                self.device.destroy_image_view(*view, None);
+            self.views.iter().for_each(|&view| {
+                self.device.destroy_image_view(view, None);
+            });
+            self.reclaimed_semaphores.iter().for_each(|&sema| {
+                self.device.destroy_semaphore(sema, None);
             });
             self.loader.destroy_swapchain(self.inner, None);
         }

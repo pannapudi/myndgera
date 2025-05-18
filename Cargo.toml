@@ -1,7 +1,7 @@
 [package]
 name = "myndgera"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 ash = "0.38"
@@ -9,24 +9,24 @@ ash-window = "0.13"
 winit = "0.30"
 anyhow = "1.0"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
 ahash = "0.8"
-notify-debouncer-full = "0.4"
+notify-debouncer-full = "0.5"
 parking_lot = "0.12"
-notify = "7.0"
-shaderc = "0.8"
-either = "1.13.0"
+notify = "8.0"
+shaderc = "0.9"
+either = "1.15"
 slotmap = "1.0.7"
 gpu-allocator = { version = "0.27", default-features = false, features = ["vulkan"] }
 ddsfile = "0.5.2"
-pretty-type-name = "1.0.1"
-glam = { version = "0.29.2", features = ["bytemuck", "mint", "rand"] }
+pretty-type-name = "1.0"
+glam = { version = "0.30", features = ["bytemuck", "mint", "rand"] }
 dolly = "0.6.0"
-bytemuck = { version = "1.19.0", features = ["derive"] }
-rand = "0.8.5"
-crossbeam-channel = "0.5.13"
-chrono = "0.4.38"
-png = "0.17.14"
+bytemuck = { version = "1.23.0", features = ["derive"] }
+rand = "0.9"
+crossbeam-channel = "0.5"
+chrono = "0.4"
+png = "0.17"
 
 [profile.deploy]
 inherits = "release"
