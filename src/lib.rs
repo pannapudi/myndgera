@@ -9,7 +9,7 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{error, warn};
+use tracing::{error, level_filters::LevelFilter, warn};
 use tracing_subscriber::{filter::EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{
     application::ApplicationHandler,
@@ -539,7 +539,11 @@ impl<F: Framework> ApplicationHandler<UserEvent> for App<F> {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         tracing_subscriber::registry()
             .with(fmt::layer())
-            .with(EnvFilter::from_default_env())
+            .with(
+                EnvFilter::builder()
+                    .with_default_directive(LevelFilter::DEBUG.into())
+                    .from_env_lossy(),
+            )
             .init();
 
         let Args {

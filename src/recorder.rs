@@ -8,7 +8,7 @@ use std::{
     time::Instant,
 };
 
-use crate::{create_folder, ImageDimensions, ManagedImage, SCREENSHOT_FOLDER, VIDEO_FOLDER};
+use crate::{ImageDimensions, ManagedImage, SCREENSHOT_FOLDER, VIDEO_FOLDER, create_folder};
 use crossbeam_channel::{Receiver, Sender};
 
 pub enum RecordEvent {
@@ -140,6 +140,7 @@ fn new_ffmpeg_command(image_dimensions: ImageDimensions, filename: &str) -> Resu
 
     #[cfg(windows)]
     {
+        use std::os::windows::process::CommandExt;
         const WINAPI_UM_WINBASE_CREATE_NO_WINDOW: u32 = 0x08000000;
         // Not create terminal window
         command.creation_flags(WINAPI_UM_WINBASE_CREATE_NO_WINDOW);

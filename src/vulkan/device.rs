@@ -10,6 +10,7 @@ use std::{
     mem::ManuallyDrop,
     sync::Arc,
 };
+use tracing::warn;
 
 use ash::{
     ext, khr,
@@ -50,9 +51,10 @@ impl Device {
     ) -> Result<(Device, vk::Queue)> {
         let required_device_extensions = [
             khr::swapchain::NAME,
+            khr::maintenance1::NAME,
             ext::graphics_pipeline_library::NAME,
             khr::pipeline_library::NAME,
-            // TODO: consider dynamic_rendering_local_read
+            // TODO: consider dynamic_rendering_local_read (if I ever care about mobile)
             khr::dynamic_rendering::NAME,
             ext::extended_dynamic_state2::NAME,
             ext::extended_dynamic_state::NAME,
@@ -77,8 +79,14 @@ impl Device {
                         .iter()
                         .map(|x| x.extension_name_as_c_str().unwrap())
                         .collect();
-                    let missing = required_device_extensions_set.difference(&extensions);
-                    if missing.count() > 0 {
+                    let mut missing = required_device_extensions_set
+                        .difference(&extensions)
+                        .peekable();
+                    if missing.peek().is_some() {
+                        let props = unsafe { instance.get_physical_device_properties(device) };
+                        let name = props.device_name_as_c_str().unwrap_or_default();
+                        warn!("Missing extenstions for {}:", name.to_string_lossy());
+                        missing.for_each(|s| println!("\t{}", s.to_string_lossy()));
                         return None;
                     }
 

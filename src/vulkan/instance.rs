@@ -49,7 +49,6 @@ impl Instance {
         ];
         let mut extensions = vec![
             ext::debug_utils::NAME.as_ptr(),
-            khr::display::NAME.as_ptr(),
             khr::get_physical_device_properties2::NAME.as_ptr(),
         ];
         if let Some(handle) = display_handle {

@@ -5,7 +5,7 @@ use ash::{
     prelude::VkResult,
     vk::{self, Handle},
 };
-use gpu_allocator::{vulkan::Allocation, MemoryLocation};
+use gpu_allocator::{MemoryLocation, vulkan::Allocation};
 use slotmap::{SecondaryMap, SlotMap};
 
 use crate::utils::align_to;
@@ -180,13 +180,13 @@ impl TextureArena {
         let pool_sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                .descriptor_count(1),
+                .descriptor_count(IMAGES_COUNT),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .descriptor_count(STORAGE_COUNT),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1),
-            vk::DescriptorPoolSize::default()
-                .ty(vk::DescriptorType::SAMPLER)
-                .descriptor_count(1),
+                .descriptor_count(SAMPLER_COUNT),
         ];
         let descriptor_pool = unsafe {
             device.create_descriptor_pool(
@@ -200,6 +200,7 @@ impl TextureArena {
                 None,
             )?
         };
+        device.name_object(descriptor_pool, "Texture Pool");
 
         // Sampled textures
         let binding_flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND;
