@@ -1,4 +1,4 @@
-use std::ffi::CStr;
+use std::{collections::HashSet, ffi::CStr};
 
 use anyhow::Result;
 use ash::{Entry, ext, khr, vk};
@@ -59,8 +59,21 @@ impl Instance {
 
         #[cfg(any(target_os = "macos", target_os = "ios"))]
         {
-            extension_names.push(ash::khr::portability_enumeration::NAME.as_ptr());
-            extension_names.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
+            extensions.push(ash::khr::portability_enumeration::NAME.as_ptr());
+            extensions.push(ash::khr::get_physical_device_properties2::NAME.as_ptr());
+        }
+
+        let props = unsafe { entry.enumerate_instance_extension_properties(None) }?;
+        let available_extensions = props
+            .iter()
+            .filter_map(|ext| ext.extension_name_as_c_str().ok())
+            .collect::<HashSet<_>>();
+        let extension_names =
+            HashSet::from_iter(extensions.iter().map(|&ext| unsafe { CStr::from_ptr(ext) }));
+        let mut missing = extension_names.difference(&available_extensions).peekable();
+        if missing.peek().is_some() {
+            warn!("Missing instance extenstions:");
+            missing.for_each(|s| println!("\t{}", s.to_string_lossy()));
         }
 
         let create_flags = if cfg!(any(target_os = "macos", target_os = "ios")) {

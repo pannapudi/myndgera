@@ -245,6 +245,7 @@ impl TextureArena {
             .set_layouts(std::slice::from_ref(&sampled_set_layout))
             .push_next(&mut variable_info);
         let sampled_set = unsafe { device.allocate_descriptor_sets(&allocate_info)? }[0];
+        device.name_object(sampled_set, "Sampled Images Set");
 
         // Storage textures
         let binding_flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND
@@ -280,6 +281,7 @@ impl TextureArena {
             .set_layouts(std::slice::from_ref(&storage_set_layout))
             .push_next(&mut variable_info);
         let storage_set = unsafe { device.allocate_descriptor_sets(&allocate_info)? }[0];
+        device.name_object(storage_set, "Storage Images Set");
 
         let mut samplers = [vk::Sampler::null(); SAMPLER_COUNT as usize];
         let mut sampler_create_info = vk::SamplerCreateInfo::default()
