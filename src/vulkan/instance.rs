@@ -72,7 +72,7 @@ impl Instance {
             HashSet::from_iter(extensions.iter().map(|&ext| unsafe { CStr::from_ptr(ext) }));
         let mut missing = extension_names.difference(&available_extensions).peekable();
         if missing.peek().is_some() {
-            warn!("Missing instance extenstions:");
+            error!("Missing instance extenstions:");
             missing.for_each(|s| println!("\t{}", s.to_string_lossy()));
         }
 
