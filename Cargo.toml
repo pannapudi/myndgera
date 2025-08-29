@@ -9,7 +9,7 @@ ash-window = "0.13"
 winit = "0.30"
 anyhow = "1.0"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 ahash = "0.8"
 notify-debouncer-full = "0.5"
 parking_lot = "0.12"
