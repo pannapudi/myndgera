@@ -212,13 +212,15 @@ impl Device {
         let command_pool = unsafe {
             device.create_command_pool(
                 &vk::CommandPoolCreateInfo::default()
-                    .flags(vk::CommandPoolCreateFlags::TRANSIENT)
+                    .flags(
+                        vk::CommandPoolCreateFlags::TRANSIENT
+                            | vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER,
+                    )
                     .queue_family_index(main_queue_family_idx),
                 None,
             )?
         };
 
-        {};
         let dbg_utils = ext::debug_utils::Device::new(&instance.inner, &device);
 
         let device = Device {
@@ -395,7 +397,7 @@ impl Device {
         unsafe { self.device.create_fence(&fence_info, None) }
     }
 
-    pub fn start_command_buffer(&self) -> VkResult<vk::CommandBuffer> {
+    pub fn allocate_command_buffer(&self) -> VkResult<vk::CommandBuffer> {
         let command_buffer = unsafe {
             self.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
@@ -405,19 +407,26 @@ impl Device {
             )?[0]
         };
 
-        unsafe {
-            self.begin_command_buffer(
-                command_buffer,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-            )?;
-        }
-
         Ok(command_buffer)
+    }
+
+    pub fn begin_command_buffer(
+        &self,
+        cbuff: &vk::CommandBuffer,
+        flags: vk::CommandBufferUsageFlags,
+    ) -> VkResult<()> {
+        unsafe {
+            self.device
+                .begin_command_buffer(*cbuff, &vk::CommandBufferBeginInfo::default().flags(flags))
+        }
     }
 
     pub fn end_command_buffer(&self, &cbuff: &vk::CommandBuffer) -> VkResult<()> {
         unsafe { self.device.end_command_buffer(cbuff) }
+    }
+
+    pub fn free_command_buffers(&self, cbuffs: &[vk::CommandBuffer]) {
+        unsafe { self.device.free_command_buffers(self.command_pool, cbuffs) }
     }
 
     pub fn one_time_submit(
@@ -436,9 +445,8 @@ impl Device {
 
         unsafe {
             self.begin_command_buffer(
-                command_buffer,
-                &vk::CommandBufferBeginInfo::default()
-                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                &command_buffer,
+                vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
             )?;
 
             callbk(self, command_buffer)?;
@@ -452,7 +460,7 @@ impl Device {
             self.wait_for_fences(&[fence], true, u64::MAX)?;
 
             self.destroy_fence(fence, None);
-            self.free_command_buffers(self.command_pool, &[command_buffer]);
+            self.free_command_buffers(&[command_buffer]);
         }
 
         Ok(())

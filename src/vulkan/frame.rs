@@ -8,6 +8,7 @@ pub struct Frame {
     pub image_available_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub present_finished: vk::Fence,
+    command_buffer: vk::CommandBuffer,
 }
 
 impl Frame {
@@ -15,11 +16,17 @@ impl Frame {
         let image_available_semaphore = device.create_semaphore()?;
         let render_finished_semaphore = device.create_semaphore()?;
         let present_finished = device.create_fence(vk::FenceCreateFlags::SIGNALED)?;
+        let command_buffer = device.allocate_command_buffer()?;
         Ok(Self {
             image_available_semaphore,
             render_finished_semaphore,
             present_finished,
+            command_buffer,
         })
+    }
+
+    pub fn command_buffer(&self) -> &vk::CommandBuffer {
+        &self.command_buffer
     }
 
     pub fn destroy(&mut self, device: &Device) {
@@ -27,13 +34,13 @@ impl Frame {
             device.destroy_fence(self.present_finished, None);
             device.destroy_semaphore(self.image_available_semaphore, None);
             device.destroy_semaphore(self.render_finished_semaphore, None);
+            device.free_command_buffers(&[self.command_buffer]);
         }
     }
 }
 
 pub struct FrameGuard {
     pub frame: Frame,
-    pub command_buffer: vk::CommandBuffer,
     pub extent: vk::Extent2D,
     pub image_idx: usize,
     pub device: Arc<Device>,
@@ -41,7 +48,7 @@ pub struct FrameGuard {
 
 impl FrameGuard {
     pub fn command_buffer(&self) -> &vk::CommandBuffer {
-        &self.command_buffer
+        &self.frame.command_buffer()
     }
 
     pub fn begin_rendering(
@@ -73,7 +80,7 @@ impl FrameGuard {
             .layer_count(1)
             .color_attachments(std::slice::from_ref(&color_attachment));
         self.device
-            .begin_rendering(&self.command_buffer, &rendering_info);
+            .begin_rendering(&self.frame.command_buffer, &rendering_info);
 
         let viewport = vk::Viewport {
             x: 0.0,

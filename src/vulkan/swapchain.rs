@@ -69,8 +69,8 @@ impl Swapchain {
         let extent = {
             let max = capabilities.max_image_extent;
             let min = capabilities.min_image_extent;
-            let width = width.min(max.width).max(min.width);
-            let height = height.min(max.height).max(min.height);
+            let width = width.clamp(min.width, max.width);
+            let height = height.clamp(min.height, max.height);
             vk::Extent2D { width, height }
         };
         debug!("Swapchain extent: {:?}", extent);
@@ -260,10 +260,13 @@ impl Swapchain {
             .wait_for_fences(&[frame.present_finished], true, one_second)?;
         unsafe { self.device.reset_fences(&[frame.present_finished])? };
 
-        let command_buffer = self.device.start_command_buffer()?;
+        self.device.begin_command_buffer(
+            frame.command_buffer(),
+            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+        )?;
 
         self.device.image_transition(
-            &command_buffer,
+            frame.command_buffer(),
             &self.images[image_idx],
             vk::ImageLayout::UNDEFINED,
             vk::ImageLayout::GENERAL,
@@ -271,7 +274,6 @@ impl Swapchain {
 
         Ok(FrameGuard {
             frame,
-            command_buffer,
             extent: self.extent,
             image_idx,
             device: self.device.clone(),
@@ -280,7 +282,7 @@ impl Swapchain {
 
     pub fn submit_image(&mut self, frame_guard: FrameGuard) -> VkResult<()> {
         let frame = frame_guard.frame;
-        let command_buffer = &frame_guard.command_buffer;
+        let command_buffer = frame.command_buffer();
 
         let image_barrier = vk::ImageMemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
