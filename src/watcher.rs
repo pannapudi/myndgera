@@ -1,6 +1,9 @@
 use ahash::{AHashMap, AHashSet};
 use anyhow::Result;
-use notify::{EventKind, RecommendedWatcher};
+use notify::{
+    EventKind, RecommendedWatcher,
+    event::{AccessKind, AccessMode},
+};
 use notify_debouncer_full::{DebounceEventResult, RecommendedCache};
 use winit::event_loop::EventLoopProxy;
 
@@ -24,7 +27,7 @@ pub struct Watcher {
 impl Watcher {
     pub fn new(proxy: EventLoopProxy<UserEvent>) -> Result<Self> {
         let watcher = notify_debouncer_full::new_debouncer(
-            Duration::from_millis(350),
+            Duration::from_millis(150),
             None,
             watch_callback(proxy),
         )?;
@@ -43,7 +46,11 @@ impl Watcher {
 
     pub fn watch_file(&mut self, path: impl AsRef<Path>) -> Result<()> {
         let mut watcher = self.watcher.lock();
-        watcher.watch(path.as_ref(), notify::RecursiveMode::NonRecursive)?;
+        let mut path = path.as_ref();
+        if path.is_file() {
+            path = path.parent().unwrap();
+        }
+        watcher.watch(path, notify::RecursiveMode::Recursive)?;
         Ok(())
     }
 }
@@ -51,11 +58,16 @@ impl Watcher {
 fn watch_callback(proxy: EventLoopProxy<UserEvent>) -> impl FnMut(DebounceEventResult) {
     move |event| match event {
         Ok(events) => {
-            if let Some(path) = events
+            for path in events
                 .into_iter()
-                .filter(|e| matches!(e.event.kind, EventKind::Modify(_)))
+                .filter(|e| {
+                    matches!(
+                        e.event.kind,
+                        EventKind::Modify(_)
+                            | EventKind::Access(AccessKind::Close(AccessMode::Write))
+                    )
+                })
                 .filter_map(|event| event.event.paths.into_iter().next())
-                .next()
             {
                 if path.extension() == Some(OsStr::new("glsl"))
                     || path.extension() == Some(OsStr::new("frag"))

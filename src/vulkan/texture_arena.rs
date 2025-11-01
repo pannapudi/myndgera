@@ -526,10 +526,10 @@ impl TextureArena {
                 if let Some(idx) = self.sampled_indices[handle][mip_level] {
                     update_sampled_set(&self.device, &self.sampled_set, idx, view);
                 }
-                if usage.contains(vk::ImageUsageFlags::STORAGE) {
-                    if let Some(idx) = self.storage_indices[handle][mip_level] {
-                        update_storage_set(&self.device, &self.storage_set, idx, view);
-                    }
+                if usage.contains(vk::ImageUsageFlags::STORAGE)
+                    && let Some(idx) = self.storage_indices[handle][mip_level]
+                {
+                    update_storage_set(&self.device, &self.storage_set, idx, view);
                 }
             }
         }

@@ -236,8 +236,7 @@ pub fn save_screenshot(frame: &[u8], image_dimensions: ImageDimensions) -> Resul
     let mut writer = encoder
         .write_header()?
         .into_stream_writer_with_size(unpadded_bytes)?;
-    writer.set_filter(png::FilterType::Paeth);
-    writer.set_adaptive_filter(png::AdaptiveFilterType::Adaptive);
+    writer.set_filter(png::Filter::Adaptive);
     for chunk in frame
         .chunks(padded_bytes)
         .map(|chunk| &chunk[..unpadded_bytes])

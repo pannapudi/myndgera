@@ -57,7 +57,7 @@ impl ViewTarget {
         &self.images[idx as usize]
     }
 
-    pub fn post_process_write(&self) -> PostProcessWrite {
+    pub fn post_process_write(&self) -> PostProcessWrite<'_> {
         let old_target = self.main_image.fetch_xor(1, Ordering::Relaxed);
         if old_target == 0 {
             PostProcessWrite {

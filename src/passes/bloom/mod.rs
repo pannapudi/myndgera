@@ -4,11 +4,11 @@ use std::{mem, sync::Arc};
 
 use anyhow::Result;
 use ash::vk;
-use glam::{uvec2, UVec2};
+use glam::{UVec2, uvec2};
 
 use crate::{
-    dispatch_optimal, AppState, ComputeHandle, Device, FrameGuard, ImageHandle, RenderContext,
-    ScreenRelation, COLOR_SUBRESOURCE_MASK,
+    AppState, COLOR_SUBRESOURCE_MASK, ComputeHandle, Device, FrameGuard, ImageHandle,
+    RenderContext, ScreenRelation, dispatch_optimal,
 };
 
 #[derive(Clone, Copy, Debug)]

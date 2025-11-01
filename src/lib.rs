@@ -344,11 +344,12 @@ impl<F: Framework> ApplicationHandler<UserEvent> for AppInit<F> {
 
         let _ = self.update().map_err(|err| error!("{err}"));
 
-        if let Some(limit) = self.state.recording_time {
-            if self.state.timeline.elapsed() >= limit && self.state.recorder.is_active() {
-                self.state.recorder.finish();
-                event_loop.exit();
-            }
+        if let Some(limit) = self.state.recording_time
+            && self.state.timeline.elapsed() >= limit
+            && self.state.recorder.is_active()
+        {
+            self.state.recorder.finish();
+            event_loop.exit();
         }
     }
 

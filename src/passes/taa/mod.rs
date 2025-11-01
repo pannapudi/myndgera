@@ -2,13 +2,13 @@ use std::mem;
 
 use anyhow::Result;
 use ash::vk;
-use glam::{vec2, Vec2};
+use glam::{Vec2, vec2};
 use rand::SeedableRng;
 use rand::{rngs::StdRng, seq::SliceRandom};
 
 use crate::{
-    dispatch_optimal, AppState, ComputeHandle, FrameGuard, ImageHandle, RenderContext,
-    ScreenRelation, ViewTarget, COLOR_SUBRESOURCE_MASK,
+    AppState, COLOR_SUBRESOURCE_MASK, ComputeHandle, FrameGuard, ImageHandle, RenderContext,
+    ScreenRelation, ViewTarget, dispatch_optimal,
 };
 
 #[repr(C)]
@@ -129,7 +129,7 @@ impl Taa {
     }
 
     pub fn get_jitter(&mut self, frame_idx: u32, width: u32, height: u32) -> Vec2 {
-        if 0 == frame_idx % self.jitter_samples.len() as u32 && frame_idx > 0 {
+        if frame_idx.is_multiple_of(self.jitter_samples.len() as u32) {
             let mut rng = StdRng::seed_from_u64(frame_idx as u64);
 
             let prev_sample = self.jitter_samples.last().copied();
