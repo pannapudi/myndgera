@@ -300,14 +300,24 @@ impl Swapchain {
 
         self.device.end_command_buffer(command_buffer)?;
 
-        let wait_semaphores = [frame.image_available_semaphore];
+        let timeline_semaphore = &self.device.timeline_semaphore;
+        let (wait_value, signal_value) = timeline_semaphore.advance(1);
+
+        let wait_semaphores = [frame.image_available_semaphore, **timeline_semaphore];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let signal_semaphores = [frame.render_finished_semaphore];
+        let signal_semaphores = [frame.render_finished_semaphore, **timeline_semaphore];
+        let signal_values = [0, signal_value];
+
+        let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(slice::from_ref(&wait_value))
+            .signal_semaphore_values(&signal_values);
+
         let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(&wait_semaphores)
+            .wait_semaphores(slice::from_ref(&wait_semaphores[0]))
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(slice::from_ref(command_buffer))
-            .signal_semaphores(&signal_semaphores);
+            .signal_semaphores(&signal_semaphores)
+            .push_next(&mut timeline_info);
         unsafe {
             self.device
                 .queue_submit(self.device.queue, &[submit_info], frame.present_finished)?
@@ -315,7 +325,7 @@ impl Swapchain {
 
         let image_indices = [frame_guard.image_idx as u32];
         let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(&signal_semaphores)
+            .wait_semaphores(slice::from_ref(&signal_semaphores[0]))
             .swapchains(slice::from_ref(&self.inner))
             .image_indices(&image_indices);
 

@@ -18,7 +18,7 @@ use ash::{
     vk::{self, Handle},
 };
 
-use super::{Buffer, BufferTyped, Instance, ManagedImage, Surface};
+use super::{Buffer, BufferTyped, Instance, ManagedImage, Surface, TimelineSemaphore};
 use crate::align_to;
 
 pub struct Device {
@@ -33,6 +33,7 @@ pub struct Device {
     pub allocator: Mutex<Allocator>,
     pub device: ash::Device,
     pub dynamic_rendering: khr::dynamic_rendering::Device,
+    pub timeline_semaphore: TimelineSemaphore,
     pub(crate) dbg_utils: ext::debug_utils::Device,
 }
 
@@ -133,6 +134,8 @@ impl Device {
 
         let required_device_extensions = required_device_extensions.map(|x| x.as_ptr());
 
+        let mut timeline_semaphore_feature =
+            vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
         let mut feature_virtual_pointers = vk::PhysicalDeviceVariablePointersFeatures::default()
             .variable_pointers(true)
             .variable_pointers_storage_buffer(true);
@@ -174,6 +177,7 @@ impl Device {
 
         let mut default_features = vk::PhysicalDeviceFeatures2::default()
             .features(features)
+            .push_next(&mut timeline_semaphore_feature)
             .push_next(&mut feature_virtual_pointers)
             .push_next(&mut feature_descriptor_indexing)
             .push_next(&mut feature_buffer_device_address)
@@ -223,6 +227,9 @@ impl Device {
 
         let dbg_utils = ext::debug_utils::Device::new(&instance.inner, &device);
 
+        let timeline_semaphore = TimelineSemaphore::new(&device)?;
+        name_object(&dbg_utils, *timeline_semaphore, "Timeline Semaphore");
+
         let device = Device {
             physical_device: pdevice,
             device_properties: device_properties.properties,
@@ -233,6 +240,7 @@ impl Device {
             command_pool,
             memory_properties,
             allocator: Mutex::new(allocator),
+            timeline_semaphore,
             device,
             dynamic_rendering,
             dbg_utils,
@@ -256,14 +264,7 @@ impl Device {
     }
 
     pub fn name_object(&self, handle: impl Handle, name: &str) {
-        let name = CString::new(name).unwrap();
-        let _ = unsafe {
-            self.dbg_utils.set_debug_utils_object_name(
-                &vk::DebugUtilsObjectNameInfoEXT::default()
-                    .object_handle(handle)
-                    .object_name(&name),
-            )
-        };
+        name_object(&self.dbg_utils, handle, name);
     }
 
     pub fn begin_debug_marker(&self, &cbuff: &vk::CommandBuffer, label: &str) {
@@ -390,6 +391,10 @@ impl Device {
     pub fn create_semaphore(&self) -> VkResult<vk::Semaphore> {
         let semaphore_info = vk::SemaphoreCreateInfo::default();
         unsafe { self.device.create_semaphore(&semaphore_info, None) }
+    }
+
+    pub fn create_timeline_semaphore(&self) -> VkResult<TimelineSemaphore> {
+        TimelineSemaphore::new(&self.device)
     }
 
     pub fn create_fence(&self, flags: vk::FenceCreateFlags) -> VkResult<vk::Fence> {
@@ -844,6 +849,8 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
+            self.device
+                .destroy_semaphore(self.timeline_semaphore.inner, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
         }
@@ -885,6 +892,17 @@ impl Drop for ScopedMarker<'_> {
                 .cmd_end_debug_utils_label(*self.command_buffer)
         };
     }
+}
+
+fn name_object(device: &ext::debug_utils::Device, handle: impl Handle, name: &str) {
+    let name = CString::new(name).unwrap();
+    let _ = unsafe {
+        device.set_debug_utils_object_name(
+            &vk::DebugUtilsObjectNameInfoEXT::default()
+                .object_handle(handle)
+                .object_name(&name),
+        )
+    };
 }
 
 fn get_pipeline_stage_flags(layout: vk::ImageLayout) -> vk::PipelineStageFlags2 {
