@@ -27,6 +27,7 @@ rand = "0.9"
 crossbeam-channel = "0.5"
 chrono = "0.4"
 png = "0.18"
+arrayvec = "0.7.6"
 
 [profile.deploy]
 inherits = "release"
