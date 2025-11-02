@@ -52,20 +52,14 @@ impl Device {
     ) -> Result<(Device, vk::Queue)> {
         let required_device_extensions = [
             khr::swapchain::NAME,
-            khr::maintenance1::NAME,
             ext::graphics_pipeline_library::NAME,
             khr::pipeline_library::NAME,
             // TODO: consider dynamic_rendering_local_read (if I ever care about mobile)
+            // host_image_copy, host_query_reset too
             khr::dynamic_rendering::NAME,
-            ext::extended_dynamic_state2::NAME,
-            ext::extended_dynamic_state::NAME,
-            khr::synchronization2::NAME,
-            khr::buffer_device_address::NAME,
-            khr::create_renderpass2::NAME,
-            ext::descriptor_indexing::NAME,
-            khr::format_feature_flags2::NAME,
             ext::shader_atomic_float::NAME,
-            ext::scalar_block_layout::NAME,
+            ext::memory_priority::NAME,
+            ext::pageable_device_local_memory::NAME,
         ];
         let required_device_extensions_set = HashSet::from(required_device_extensions);
 
@@ -134,6 +128,14 @@ impl Device {
 
         let required_device_extensions = required_device_extensions.map(|x| x.as_ptr());
 
+        let mut memory_priority_feature =
+            vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default().memory_priority(true);
+        let mut pageable_device_memory_feature =
+            vk::PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT::default()
+                .pageable_device_local_memory(true);
+        let mut swapchain_maintenance_feature =
+            vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
+                .swapchain_maintenance1(true);
         let mut timeline_semaphore_feature =
             vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
         let mut feature_virtual_pointers = vk::PhysicalDeviceVariablePointersFeatures::default()
@@ -177,6 +179,9 @@ impl Device {
 
         let mut default_features = vk::PhysicalDeviceFeatures2::default()
             .features(features)
+            .push_next(&mut memory_priority_feature)
+            .push_next(&mut pageable_device_memory_feature)
+            .push_next(&mut swapchain_maintenance_feature)
             .push_next(&mut timeline_semaphore_feature)
             .push_next(&mut feature_virtual_pointers)
             .push_next(&mut feature_descriptor_indexing)
@@ -227,7 +232,7 @@ impl Device {
 
         let dbg_utils = ext::debug_utils::Device::new(&instance.inner, &device);
 
-        let timeline_semaphore = TimelineSemaphore::new(&device)?;
+        let timeline_semaphore = TimelineSemaphore::new(&device, None)?;
         name_object(&dbg_utils, *timeline_semaphore, "Timeline Semaphore");
 
         let device = Device {
@@ -393,8 +398,11 @@ impl Device {
         unsafe { self.device.create_semaphore(&semaphore_info, None) }
     }
 
-    pub fn create_timeline_semaphore(&self) -> VkResult<TimelineSemaphore> {
-        TimelineSemaphore::new(&self.device)
+    pub fn create_timeline_semaphore(
+        &self,
+        initial_value: Option<u64>,
+    ) -> VkResult<TimelineSemaphore> {
+        TimelineSemaphore::new(&self.device, initial_value)
     }
 
     pub fn create_fence(&self, flags: vk::FenceCreateFlags) -> VkResult<vk::Fence> {
