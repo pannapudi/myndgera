@@ -51,15 +51,15 @@ impl TimelineSemaphore {
     }
 
     pub fn advance(&self, to: u64) -> (u64, u64) {
-        let wait_value = self.value();
+        let wait_value = self
+            .value
+            .fetch_add(to, std::sync::atomic::Ordering::Release);
         let signal_value = wait_value + to;
-        self.value
-            .fetch_add(to, std::sync::atomic::Ordering::Relaxed);
         (wait_value, signal_value)
     }
 
     pub fn value(&self) -> u64 {
-        self.value.load(std::sync::atomic::Ordering::Relaxed)
+        self.value.load(std::sync::atomic::Ordering::Acquire)
     }
 }
 

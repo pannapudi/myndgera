@@ -54,7 +54,6 @@ impl Swapchain {
             .unwrap_or(&surface_info.formats[0]);
         debug!("Swapchain format: {:?}", format);
 
-        // Swapchain present mode
         let present_mode = surface_info
             .present_modes
             .iter()
@@ -65,7 +64,6 @@ impl Swapchain {
 
         let capabilities = surface_info.capabilities;
 
-        // Swapchain extent
         let extent = {
             let max = capabilities.max_image_extent;
             let min = capabilities.min_image_extent;
@@ -76,15 +74,11 @@ impl Swapchain {
         debug!("Swapchain extent: {:?}", extent);
 
         // Swapchain image count
-        let image_count = capabilities
-            .max_image_count
-            .min(3)
-            .max(capabilities.min_image_count);
+        let image_count = 3.clamp(capabilities.min_image_count, capabilities.max_image_count);
         debug!("Swapchain image count: {:?}", image_count);
 
         let queue_family_index = [device.main_queue_family_idx];
 
-        // Swapchain
         assert!(
             capabilities
                 .supported_composite_alpha
@@ -111,21 +105,16 @@ impl Swapchain {
             .clipped(true);
         let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
 
-        // Swapchain images and image views
         let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-        images
-            .iter()
-            .enumerate()
-            .for_each(|(i, &image)| device.name_object(image, &format!("Swapchain Image {i}")));
-
         let views = images
             .iter()
             .map(|img| device.create_2d_view(img, format.format, 0))
             .collect::<VkResult<Vec<_>>>()?;
-        views
-            .iter()
-            .enumerate()
-            .for_each(|(i, &view)| device.name_object(view, &format!("Swapchain View {i}")));
+
+        for (i, (&image, &view)) in std::iter::zip(&images, &views).enumerate() {
+            device.name_object(image, &format!("Swapchain Image {i}"));
+            device.name_object(view, &format!("Swapchain View {i}"));
+        }
 
         let frames = (0..images.len())
             .map(|_| Some(Frame::new(device)).transpose())
@@ -281,7 +270,7 @@ impl Swapchain {
     }
 
     pub fn submit_image(&mut self, frame_guard: FrameGuard) -> VkResult<()> {
-        let frame = frame_guard.frame;
+        let mut frame = frame_guard.frame;
         let command_buffer = frame.command_buffer();
 
         let image_barrier = vk::ImageMemoryBarrier2::default()
@@ -301,34 +290,45 @@ impl Swapchain {
         self.device.end_command_buffer(command_buffer)?;
 
         let timeline_semaphore = &self.device.timeline_semaphore;
-        let (wait_value, signal_value) = timeline_semaphore.advance(1);
+        let (_wait_value, signal_value) = dbg!(timeline_semaphore.advance(1));
+        dbg!((frame_guard.image_idx, frame.frame_number));
+        println!();
 
-        let wait_semaphores = [frame.image_available_semaphore, **timeline_semaphore];
-        let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-        let signal_semaphores = [frame.render_finished_semaphore, **timeline_semaphore];
-        let signal_values = [0, signal_value];
-
-        let mut timeline_info = vk::TimelineSemaphoreSubmitInfo::default()
-            .wait_semaphore_values(slice::from_ref(&wait_value))
-            .signal_semaphore_values(&signal_values);
-
-        let submit_info = vk::SubmitInfo::default()
-            .wait_semaphores(slice::from_ref(&wait_semaphores[0]))
-            .wait_dst_stage_mask(&wait_stages)
-            .command_buffers(slice::from_ref(command_buffer))
-            .signal_semaphores(&signal_semaphores)
-            .push_next(&mut timeline_info);
+        let wait_semaphores_info = [
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(frame.image_available_semaphore)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+            // vk::SemaphoreSubmitInfo::default()
+            //     .semaphore(**timeline_semaphore)
+            //     .value(wait_value),
+        ];
+        let signal_semaphores_info = [
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(frame.render_finished_semaphore)
+                .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE),
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(**timeline_semaphore)
+                .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+                .value(signal_value),
+        ];
+        let cbuf_info = vk::CommandBufferSubmitInfo::default().command_buffer(*command_buffer);
+        let submit_info = vk::SubmitInfo2::default()
+            .wait_semaphore_infos(&wait_semaphores_info)
+            .signal_semaphore_infos(&signal_semaphores_info)
+            .command_buffer_infos(slice::from_ref(&cbuf_info));
         unsafe {
             self.device
-                .queue_submit(self.device.queue, &[submit_info], frame.present_finished)?
+                .queue_submit2(self.device.queue, &[submit_info], frame.present_finished)?
         };
 
-        let image_indices = [frame_guard.image_idx as u32];
+        let frame_idx = frame_guard.image_idx as u32;
+        let wait_semaphore = frame.render_finished_semaphore;
         let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(slice::from_ref(&signal_semaphores[0]))
+            .wait_semaphores(slice::from_ref(&wait_semaphore))
             .swapchains(slice::from_ref(&self.inner))
-            .image_indices(&image_indices);
+            .image_indices(slice::from_ref(&frame_idx));
 
+        frame.frame_number += self.images.len() as u64;
         self.frames[self.current_frame] = Some(frame);
 
         match unsafe { self.loader.queue_present(self.device.queue, &present_info) } {

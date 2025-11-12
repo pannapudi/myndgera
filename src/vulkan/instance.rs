@@ -2,34 +2,16 @@ use std::{collections::HashSet, ffi::CStr};
 
 use anyhow::Result;
 use ash::{Entry, ext, khr, vk};
-use tracing::{debug, error, info, warn};
+use tracing::error;
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
 use super::{Device, Surface};
 
-unsafe extern "system" fn vulkan_debug_callback(
-    flag: vk::DebugUtilsMessageSeverityFlagsEXT,
-    typ: vk::DebugUtilsMessageTypeFlagsEXT,
-    p_callback_data: *const vk::DebugUtilsMessengerCallbackDataEXT,
-    _: *mut std::ffi::c_void,
-) -> vk::Bool32 {
-    use vk::DebugUtilsMessageSeverityFlagsEXT as Flag;
-
-    let message = unsafe { CStr::from_ptr((*p_callback_data).p_message) }.to_string_lossy();
-    match flag {
-        Flag::VERBOSE => debug!("{:?} - {}", typ, message),
-        Flag::INFO => info!("{:?} - {}", typ, message),
-        Flag::WARNING => warn!("{:?} - {}", typ, message),
-        _ => error!("{:?} - {}", typ, message),
-    }
-    vk::FALSE
-}
-
 pub struct Instance {
     pub entry: ash::Entry,
     pub inner: ash::Instance,
-    dbg_loader: ext::debug_utils::Instance,
-    dbg_callbk: vk::DebugUtilsMessengerEXT,
+    _dbg_loader: ext::debug_utils::Instance,
+    // dbg_callbk: vk::DebugUtilsMessengerEXT,
 }
 
 impl std::ops::Deref for Instance {
@@ -43,10 +25,6 @@ impl std::ops::Deref for Instance {
 impl Instance {
     pub fn new(display_handle: Option<&impl HasDisplayHandle>) -> Result<Self> {
         let entry = unsafe { Entry::load() }?;
-        let layers = [
-            #[cfg(debug_assertions)]
-            c"VK_LAYER_KHRONOS_validation".as_ptr(),
-        ];
         let mut extensions = vec![
             ext::debug_utils::NAME.as_ptr(),
             khr::get_physical_device_properties2::NAME.as_ptr(),
@@ -88,29 +66,13 @@ impl Instance {
         let instance_info = vk::InstanceCreateInfo::default()
             .application_info(&appinfo)
             .flags(create_flags)
-            .enabled_layer_names(&layers)
             .enabled_extension_names(&extensions);
         let inner = unsafe { entry.create_instance(&instance_info, None) }?;
 
-        let dbg_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(
-                vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
-                    // | vk::DebugUtilsMessageSeverityFlagsEXT::VERBOSE
-                    // | vk::DebugUtilsMessageSeverityFlagsEXT::INFO
-                    | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
-            )
-            .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
-                    | vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
-                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
-            )
-            .pfn_user_callback(Some(vulkan_debug_callback));
         let dbg_loader = ext::debug_utils::Instance::new(&entry, &inner);
-        let dbg_callbk = unsafe { dbg_loader.create_debug_utils_messenger(&dbg_info, None)? };
 
         Ok(Self {
-            dbg_loader,
-            dbg_callbk,
+            _dbg_loader: dbg_loader,
             entry,
             inner,
         })
@@ -131,8 +93,6 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         unsafe {
-            self.dbg_loader
-                .destroy_debug_utils_messenger(self.dbg_callbk, None);
             self.inner.destroy_instance(None);
         }
     }

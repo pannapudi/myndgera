@@ -8,6 +8,7 @@ pub struct Frame {
     pub image_available_semaphore: vk::Semaphore,
     pub render_finished_semaphore: vk::Semaphore,
     pub present_finished: vk::Fence,
+    pub frame_number: u64,
     command_buffer: vk::CommandBuffer,
 }
 
@@ -16,11 +17,13 @@ impl Frame {
         let image_available_semaphore = device.create_semaphore()?;
         let render_finished_semaphore = device.create_semaphore()?;
         let present_finished = device.create_fence(vk::FenceCreateFlags::SIGNALED)?;
+        let frame_number = device.timeline_semaphore.value();
         let command_buffer = device.allocate_command_buffer()?;
         Ok(Self {
             image_available_semaphore,
             render_finished_semaphore,
             present_finished,
+            frame_number,
             command_buffer,
         })
     }
@@ -48,7 +51,7 @@ pub struct FrameGuard {
 
 impl FrameGuard {
     pub fn command_buffer(&self) -> &vk::CommandBuffer {
-        &self.frame.command_buffer()
+        self.frame.command_buffer()
     }
 
     pub fn begin_rendering(
@@ -61,7 +64,7 @@ impl FrameGuard {
         self.device.image_transition(
             self.command_buffer(),
             image,
-            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::UNDEFINED, // WARN:: they set it to present
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
 
@@ -70,7 +73,7 @@ impl FrameGuard {
         };
         let color_attachment = vk::RenderingAttachmentInfo::default()
             .image_view(*view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) // WARN: no layout specified?
             .resolve_image_layout(vk::ImageLayout::PRESENT_SRC_KHR)
             .load_op(load_op)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -184,5 +187,6 @@ impl FrameGuard {
 
     pub fn end_rendering(&self) {
         self.device.end_rendering(self.command_buffer());
+        // WARN: barrier col_attachment -> present
     }
 }

@@ -26,6 +26,7 @@ pub struct Device {
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub device_properties: vk::PhysicalDeviceProperties,
     pub descriptor_indexing_props: vk::PhysicalDeviceDescriptorIndexingProperties<'static>,
+    // TODO: reset it before or after each frame
     pub command_pool: vk::CommandPool,
     pub main_queue_family_idx: u32,
     pub queue: vk::Queue,
@@ -232,6 +233,7 @@ impl Device {
 
         let dbg_utils = ext::debug_utils::Device::new(&instance.inner, &device);
 
+        // Initialize timeline semaphore with (numFrames - 1) to allow concurrent frame submission. See details in README.md
         let timeline_semaphore = TimelineSemaphore::new(&device, None)?;
         name_object(&dbg_utils, *timeline_semaphore, "Timeline Semaphore");
 
@@ -456,25 +458,23 @@ impl Device {
             )?[0]
         };
 
-        unsafe {
-            self.begin_command_buffer(
-                &command_buffer,
-                vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-            )?;
+        self.begin_command_buffer(
+            &command_buffer,
+            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+        )?;
 
-            callbk(self, command_buffer)?;
+        callbk(self, command_buffer)?;
 
-            self.end_command_buffer(&command_buffer)?;
+        self.end_command_buffer(&command_buffer)?;
 
-            let submit_info =
-                vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
+        let submit_info =
+            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
 
-            self.queue_submit(self.queue, &[submit_info], fence)?;
-            self.wait_for_fences(&[fence], true, u64::MAX)?;
+        self.queue_submit(&self.queue, &[submit_info], Some(fence))?;
+        self.wait_for_fences(&[fence], true, u64::MAX)?;
 
-            self.destroy_fence(fence, None);
-            self.free_command_buffers(&[command_buffer]);
-        }
+        unsafe { self.destroy_fence(fence, None) };
+        self.free_command_buffers(&[command_buffer]);
 
         Ok(())
     }
@@ -741,6 +741,18 @@ impl Device {
                 first_instance,
             )
         };
+    }
+
+    pub fn queue_submit(
+        &self,
+        &queue: &vk::Queue,
+        submits: &[vk::SubmitInfo],
+        fence: Option<vk::Fence>,
+    ) -> VkResult<()> {
+        unsafe {
+            self.device
+                .queue_submit(queue, submits, fence.unwrap_or(vk::Fence::null()))
+        }
     }
 
     pub fn bind_index_buffer(&self, &cbuff: &vk::CommandBuffer, buffer: vk::Buffer, offset: u64) {
