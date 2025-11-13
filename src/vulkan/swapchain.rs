@@ -9,6 +9,8 @@ use ash::{
 use tracing::debug;
 use winit::window::Window;
 
+use crate::COLOR_SUBRESOURCE_MASK;
+
 use super::{Device, ImageDimensions, Instance, Surface};
 
 const MAX_IMAGE_CAP: usize = 16;
@@ -252,32 +254,20 @@ impl Swapchain {
         self.device
             .begin_command_buffer(&cbuff, vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
-        self.device.image_transition(
-            &cbuff,
-            &self.get_image(image_idx),
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
-
         Ok(FrameGuard {
             cbuff,
             sync_idx,
             image_idx,
             extent: self.extent,
             device: self.device.clone(),
+            image: None,
+            view: None,
         })
     }
 
     pub fn submit_frame(&mut self, frame_guard: FrameGuard) -> VkResult<()> {
         let frame = &mut self.frames[frame_guard.sync_idx];
         let image_idx = frame_guard.image_idx;
-
-        self.device.image_transition(
-            &frame_guard.cbuff,
-            &self.guts.images[image_idx],
-            vk::ImageLayout::ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::PRESENT_SRC_KHR,
-        );
 
         self.device.end_command_buffer(&frame_guard.cbuff)?;
 
@@ -425,8 +415,10 @@ impl InnerGuts {
 
 pub struct FrameGuard {
     sync_idx: usize,
-    pub image_idx: usize,
     pub cbuff: vk::CommandBuffer,
+    image: Option<vk::Image>,
+    view: Option<vk::ImageView>,
+    pub image_idx: usize,
 
     pub extent: vk::Extent2D,
     pub device: Arc<Device>,
@@ -438,24 +430,35 @@ impl FrameGuard {
     }
 
     pub fn begin_rendering(
-        &self,
-        image: &vk::Image,
-        view: &vk::ImageView,
+        &mut self,
+        &image: &vk::Image,
+        &view: &vk::ImageView,
         load_op: vk::AttachmentLoadOp,
         color: [f32; 4],
     ) {
-        self.device.image_transition(
-            self.command_buffer(),
-            image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        );
+        self.image = Some(image);
+        self.view = Some(view);
+        let image_barrier = vk::ImageMemoryBarrier2::default()
+            .image(image)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::NONE)
+            .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .dst_access_mask(
+                vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            )
+            .subresource_range(COLOR_SUBRESOURCE_MASK);
+        let dependency_info = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&image_barrier));
+        self.device
+            .pipeline_barrier(self.command_buffer(), &dependency_info);
 
         let clear_color = vk::ClearValue {
             color: vk::ClearColorValue { float32: color },
         };
         let color_attachment = vk::RenderingAttachmentInfo::default()
-            .image_view(*view)
+            .image_view(view)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .resolve_image_layout(vk::ImageLayout::PRESENT_SRC_KHR)
             .load_op(load_op)
@@ -570,6 +573,19 @@ impl FrameGuard {
 
     pub fn end_rendering(&self) {
         self.device.end_rendering(self.command_buffer());
-        // WARN: barrier col_attachment -> present
+
+        let image_barrier = vk::ImageMemoryBarrier2::default()
+            .image(self.image.unwrap())
+            .old_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::NONE)
+            .dst_access_mask(vk::AccessFlags2::NONE)
+            .subresource_range(COLOR_SUBRESOURCE_MASK);
+        let dependency_info = vk::DependencyInfo::default()
+            .image_memory_barriers(std::slice::from_ref(&image_barrier));
+        self.device
+            .pipeline_barrier(self.command_buffer(), &dependency_info);
     }
 }
