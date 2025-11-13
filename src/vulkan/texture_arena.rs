@@ -594,6 +594,10 @@ impl TextureArena {
                 );
                 Ok(())
             })?;
+
+            let (buffer, memory) = staging.break_apart();
+            self.device.destroy_resource_with_delay(buffer, 3);
+            self.device.destroy_resource_with_delay(memory, 3);
         }
 
         let mut views = [None; MAX_MIPCOUNT];

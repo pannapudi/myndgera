@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use ash::vk;
+use ash::{prelude::VkResult, vk};
 use gpu_allocator::MemoryLocation;
 
 use super::{Buffer, Device};
@@ -27,6 +27,7 @@ impl StagingWrite {
             vk::BufferUsageFlags::TRANSFER_SRC,
             MemoryLocation::CpuToGpu,
         )?;
+        device.name_object(*buffer, "Staging Buffer");
         Ok(Self {
             buffer,
             intermediate_data: vec![],
@@ -47,10 +48,10 @@ impl StagingWrite {
         self.intermediate_data.extend(data);
     }
 
-    pub fn reserve_storage(&mut self) -> Result<bool> {
+    pub fn reserve_storage(&mut self) -> VkResult<Option<Buffer>> {
         let offset = self.intermediate_data.len();
         if offset < self.buffer.size as usize {
-            return Ok(false);
+            return Ok(None);
         }
 
         let max_buffer_size = self
@@ -62,20 +63,24 @@ impl StagingWrite {
             .checked_next_power_of_two()
             .unwrap_or(offset)
             .min(max_buffer_size as usize);
-        self.buffer = self.device.create_buffer(
-            new_size as u64,
-            vk::BufferUsageFlags::TRANSFER_SRC,
-            MemoryLocation::CpuToGpu,
-        )?;
+        let old_buffer = std::mem::replace(
+            &mut self.buffer,
+            self.device.create_buffer(
+                new_size as u64,
+                vk::BufferUsageFlags::TRANSFER_SRC,
+                MemoryLocation::CpuToGpu,
+            )?,
+        );
+        self.device.name_object(*self.buffer, "Staging Buffer");
 
-        Ok(true)
+        Ok(Some(old_buffer))
     }
 
-    pub fn consume_pending_writes(&mut self, &cbuff: &vk::CommandBuffer) -> Result<()> {
+    pub fn consume_pending_writes(&mut self, &cbuff: &vk::CommandBuffer) -> Result<Option<Buffer>> {
         if self.pending_writes.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
-        self.reserve_storage()?;
+        let old_buffer = self.reserve_storage()?;
         let mapped = self.buffer.map_memory().context("Failed to map memory")?;
         mapped[..self.intermediate_data.len()].copy_from_slice(&self.intermediate_data);
         for write in self.pending_writes.drain(..) {
@@ -86,6 +91,6 @@ impl StagingWrite {
             unsafe { self.device.cmd_copy_buffer2(cbuff, &copy_info) };
         }
         self.intermediate_data.clear();
-        Ok(())
+        Ok(old_buffer)
     }
 }

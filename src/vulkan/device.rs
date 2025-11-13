@@ -39,6 +39,7 @@ pub struct Device {
     pub deletion_queue: Mutex<DeletionQueue>,
 
     pub timeline_semaphore: TimelineSemaphore,
+    pub simulation_semaphore: TimelineSemaphore,
 
     pub(crate) dbg_utils: ext::debug_utils::Device,
     pub surface_fns: ash::khr::surface::Instance,
@@ -230,6 +231,8 @@ impl Device {
 
         let timeline_semaphore = TimelineSemaphore::new(&device, Some(3))?;
         name_object(&dbg_utils, *timeline_semaphore, "Timeline Semaphore");
+        let simulation_semaphore = TimelineSemaphore::new(&device, Some(3))?;
+        name_object(&dbg_utils, *simulation_semaphore, "Simulation Semaphore");
 
         let device = Device {
             physical_device: pdevice,
@@ -243,6 +246,7 @@ impl Device {
             allocator: Mutex::new(allocator),
             deletion_queue: Mutex::new(DeletionQueue::new()),
             timeline_semaphore,
+            simulation_semaphore,
             device,
             dbg_utils,
             surface_fns,
@@ -257,6 +261,9 @@ impl Device {
         let _ = unsafe { self.device.device_wait_idle() };
     }
 
+    pub fn reset_fences(&self, fences: &[vk::Fence]) -> VkResult<()> {
+        unsafe { self.device.reset_fences(fences) }
+    }
     pub fn wait_for_fences(
         &self,
         fences: &[vk::Fence],
@@ -462,9 +469,8 @@ impl Device {
     pub fn one_time_submit(
         self: &Arc<Self>,
         callbk: impl FnOnce(&Arc<Self>, vk::CommandBuffer) -> anyhow::Result<()>,
-    ) -> Result<()> {
-        let semaphore = self.create_timeline_semaphore(None)?;
-        let signal_value = semaphore.next_value();
+    ) -> Result<u64> {
+        let (wait_value, signal_value) = self.simulation_semaphore.advance(1);
 
         let command_buffer = unsafe {
             self.allocate_command_buffers(
@@ -474,6 +480,7 @@ impl Device {
                     .level(vk::CommandBufferLevel::PRIMARY),
             )?[0]
         };
+        self.name_object(command_buffer, "One Time Command Buffer");
 
         self.begin_command_buffer(
             &command_buffer,
@@ -488,20 +495,19 @@ impl Device {
         self.queue_submit(
             &self.queue,
             &[vk::SubmitInfo2::default()
-                .signal_semaphore_infos(slice::from_ref(
-                    &vk::SemaphoreSubmitInfo::default()
-                        .semaphore(*semaphore)
-                        .value(signal_value),
-                ))
+                .wait_semaphore_infos(&[vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*self.simulation_semaphore)
+                    .value(wait_value)])
+                .signal_semaphore_infos(&[vk::SemaphoreSubmitInfo::default()
+                    .semaphore(*self.simulation_semaphore)
+                    .value(signal_value)])
                 .command_buffer_infos(std::slice::from_ref(&cbuff_info))],
             None,
         )?;
-        self.wait_on_semaphore(&semaphore, signal_value)?;
 
-        self.free_command_buffers(&[command_buffer]);
-        self.destroy_resource(semaphore);
+        self.destroy_resource_with_delay(command_buffer, 3);
 
-        Ok(())
+        Ok(signal_value)
     }
 
     pub fn alloc_memory(
@@ -537,8 +543,12 @@ impl Device {
     }
 
     pub fn destroy_resource(&self, resource: impl Into<DeletableResource>) {
+        self.destroy_resource_with_delay(resource, 0);
+    }
+
+    pub fn destroy_resource_with_delay(&self, resource: impl Into<DeletableResource>, delay: u64) {
         let mut queue = self.deletion_queue.lock();
-        queue.queue_deletion_after(resource, self.timeline_semaphore.value());
+        queue.queue_deletion_after(resource, self.timeline_semaphore.value() + delay);
     }
 
     pub fn destroy_pending_resources(&self) {
@@ -670,7 +680,7 @@ impl Device {
         size: u64,
         usage: vk::BufferUsageFlags,
         memory_usage: MemoryLocation,
-    ) -> Result<Buffer> {
+    ) -> VkResult<Buffer> {
         let buffer = unsafe {
             self.device.create_buffer(
                 &vk::BufferCreateInfo::default()
@@ -698,7 +708,7 @@ impl Device {
             size,
             buffer,
             memory: ManuallyDrop::new(memory),
-            device: self.clone(),
+            device: Arc::downgrade(self),
         })
     }
 
@@ -947,7 +957,9 @@ impl Drop for Device {
                 queue.destroy_all_immediate(self);
             }
             self.device
-                .destroy_semaphore(self.timeline_semaphore.inner, None);
+                .destroy_semaphore(*self.timeline_semaphore, None);
+            self.device
+                .destroy_semaphore(*self.simulation_semaphore, None);
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
         }

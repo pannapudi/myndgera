@@ -1,7 +1,7 @@
 use std::{
     marker::PhantomData,
     mem::{self, ManuallyDrop},
-    sync::Arc,
+    sync::{Arc, Weak},
 };
 
 use ash::vk;
@@ -27,20 +27,36 @@ pub struct Buffer {
     pub size: u64,
     pub buffer: vk::Buffer,
     pub memory: ManuallyDrop<Allocation>,
-    pub(super) device: Arc<Device>,
+    pub(super) device: Weak<Device>,
+}
+
+impl std::ops::Deref for Buffer {
+    type Target = vk::Buffer;
+    fn deref(&self) -> &Self::Target {
+        &self.buffer
+    }
 }
 
 impl Buffer {
     pub fn map_memory(&mut self) -> Option<&mut [u8]> {
         self.memory.mapped_slice_mut()
     }
+
+    pub fn break_apart(mut self) -> (vk::Buffer, Allocation) {
+        let buffer = self.buffer;
+        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
+        std::mem::forget(self);
+        (buffer, memory)
+    }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        self.device.destroy_resource(self.buffer);
-        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
-        self.device.destroy_resource(memory);
+        if let Some(device) = self.device.upgrade() {
+            device.destroy_resource(self.buffer);
+            let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
+            device.destroy_resource(memory);
+        }
     }
 }
 
@@ -52,11 +68,25 @@ pub struct BufferTyped<T: 'static> {
     pub(super) _marker: PhantomData<*mut T>,
 }
 
+impl<T> std::ops::Deref for BufferTyped<T> {
+    type Target = vk::Buffer;
+    fn deref(&self) -> &Self::Target {
+        &self.buffer
+    }
+}
+
 impl<T> BufferTyped<T> {
     pub fn map_memory(&mut self) -> Option<&mut T> {
         self.memory
             .mapped_slice_mut()
             .map(|slice| utils::from_bytes::<T>(slice))
+    }
+
+    pub fn break_apart(mut self) -> (vk::Buffer, Allocation) {
+        let buffer = self.buffer;
+        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
+        std::mem::forget(self);
+        (buffer, memory)
     }
 }
 

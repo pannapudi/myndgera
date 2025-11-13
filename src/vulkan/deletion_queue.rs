@@ -10,6 +10,7 @@ pub enum DeletableResource {
     Swapchain(vk::SwapchainKHR),
     Surface(vk::SurfaceKHR),
 
+    Fence(vk::Fence),
     Semaphore(vk::Semaphore),
 
     CommandBuffer(vk::CommandBuffer),
@@ -18,6 +19,12 @@ pub enum DeletableResource {
     Buffer(vk::Buffer),
     Pipeline(vk::Pipeline),
     PipelineLayout(vk::PipelineLayout),
+}
+
+impl From<vk::Fence> for DeletableResource {
+    fn from(resource: vk::Fence) -> Self {
+        Self::Fence(resource)
+    }
 }
 
 impl From<vk::DeviceMemory> for DeletableResource {
@@ -92,6 +99,7 @@ impl From<vk::CommandBuffer> for DeletableResource {
     }
 }
 
+#[derive(Debug)]
 pub struct PendingDeletion {
     timeline_value: u64,
     resource: DeletableResource,
@@ -161,6 +169,7 @@ unsafe fn destroy_resource_immediate(device: &Device, resource: impl Into<Deleta
             Swapchain(res) => device.swapchain_fns.destroy_swapchain(res, None),
             Surface(res) => device.surface_fns.destroy_surface(res, None),
 
+            Fence(res) => device.destroy_fence(res, None),
             Semaphore(res) => device.destroy_semaphore(res, None),
 
             ImageView(res) => device.destroy_image_view(res, None),

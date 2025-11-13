@@ -248,7 +248,7 @@ impl Swapchain {
 
         self.device
             .wait_for_fences(&[frame.present_finished], true, u64::MAX)?;
-        unsafe { self.device.reset_fences(&[frame.present_finished])? };
+        self.device.reset_fences(&[frame.present_finished])?;
 
         let cbuff = self.device.allocate_command_buffer()?;
         self.device
@@ -449,10 +449,11 @@ impl FrameGuard {
                 vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
             )
             .subresource_range(COLOR_SUBRESOURCE_MASK);
-        let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&image_barrier));
-        self.device
-            .pipeline_barrier(self.command_buffer(), &dependency_info);
+        self.device.pipeline_barrier(
+            self.command_buffer(),
+            &vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&image_barrier)),
+        );
 
         let clear_color = vk::ClearValue {
             color: vk::ClearColorValue { float32: color },
@@ -583,9 +584,10 @@ impl FrameGuard {
             .dst_stage_mask(vk::PipelineStageFlags2::NONE)
             .dst_access_mask(vk::AccessFlags2::NONE)
             .subresource_range(COLOR_SUBRESOURCE_MASK);
-        let dependency_info = vk::DependencyInfo::default()
-            .image_memory_barriers(std::slice::from_ref(&image_barrier));
-        self.device
-            .pipeline_barrier(self.command_buffer(), &dependency_info);
+        self.device.pipeline_barrier(
+            self.command_buffer(),
+            &vk::DependencyInfo::default()
+                .image_memory_barriers(std::slice::from_ref(&image_barrier)),
+        );
     }
 }

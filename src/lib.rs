@@ -252,8 +252,20 @@ impl<F: Framework> AppInit<F> {
 
         state.frame_accumulated_time += frame_time;
         while state.frame_accumulated_time >= FIXED_TIME_STEP {
+            self.ctx.device.destroy_pending_resources();
+
             self.device.one_time_submit(|device, cbuff| {
                 let _marker = device.create_scoped_marker(&cbuff, "State Update");
+
+                let memory_barrier = vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .dst_stage_mask(vk::PipelineStageFlags2::TRANSFER)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE);
+                device.pipeline_barrier(
+                    &cbuff,
+                    &vk::DependencyInfo::default().memory_barriers(&[memory_barrier]),
+                );
 
                 state.input.tick();
 
@@ -312,8 +324,6 @@ impl<F: Framework> AppInit<F> {
     }
 
     fn draw(&mut self) -> VkResult<()> {
-        self.ctx.device.destroy_pending_resources();
-
         let mut frame = self.ctx.swapchain.start_frame()?;
 
         self.framework
