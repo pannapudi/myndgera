@@ -15,7 +15,7 @@ impl ShaderCompiler {
             shaderc::CompileOptions::new().context("Failed to create shader compiler options")?;
         options.set_target_env(
             shaderc::TargetEnv::Vulkan,
-            shaderc::EnvVersion::Vulkan1_3 as u32,
+            shaderc::EnvVersion::Vulkan1_4 as u32,
         );
         if !cfg!(debug_assertions) {
             options.set_optimization_level(shaderc::OptimizationLevel::Performance);

@@ -5,15 +5,16 @@ use glam::{vec2, vec3};
 use gpu_allocator::MemoryLocation;
 use std::{
     io::Write,
+    iter,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
-use tracing::{error, level_filters::LevelFilter, warn};
+use tracing::{error, info, level_filters::LevelFilter, warn};
 use tracing_subscriber::{filter::EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use winit::{
     application::ApplicationHandler,
-    dpi::{LogicalPosition, LogicalSize, PhysicalSize},
+    dpi::{LogicalPosition, LogicalSize},
     event::{ElementState, KeyEvent, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy},
     keyboard::{Key, NamedKey},
@@ -69,7 +70,7 @@ pub trait Framework: Sized {
         "Myndgera"
     }
     fn init(app: &RenderContext, _ctx: &mut AppState) -> Result<Self>;
-    fn resize(&mut self, _ctx: &mut RenderContext) -> Result<()> {
+    fn resize(&mut self, _ctx: &mut RenderContext) -> VkResult<()> {
         Ok(())
     }
     fn update(
@@ -140,7 +141,7 @@ impl AppState {
 
         let mut texture_arena = TextureArena::new(&ctx.device)?;
         let mut swapchain_handles = vec![];
-        for (&image, &view) in ctx.swapchain.images.iter().zip(&ctx.swapchain.views) {
+        for (&image, &view) in iter::zip(ctx.swapchain.images(), ctx.swapchain.views()) {
             swapchain_handles.push(texture_arena.push_external_image(image, view)?);
         }
 
@@ -182,10 +183,11 @@ pub struct AppInit<F> {
 
 impl<F> AppInit<F> {
     pub fn reload_shaders(&mut self, path: PathBuf) -> Result<()> {
-        for frame in self.ctx.swapchain.frames.iter().filter_map(Option::as_ref) {
-            let fences = std::slice::from_ref(&frame.present_finished);
-            self.device.wait_for_fences(fences, true, u64::MAX)?;
-        }
+        let frame = self.ctx.swapchain.current_frame();
+        self.device.wait_on_semaphore(
+            &self.device.timeline_semaphore,
+            frame.prev_submit_timeline_value,
+        )?;
 
         let state = &mut self.state;
         let resolved = {
@@ -277,17 +279,18 @@ impl<F: Framework> AppInit<F> {
         Ok(())
     }
 
-    pub fn recreate_swapchain(&mut self) -> Result<()> {
-        if let Some(frame) = self.ctx.swapchain.get_current_frame() {
-            let fences = std::slice::from_ref(&frame.present_finished);
-            let one_second = Duration::from_secs(1).as_nanos() as u64;
-            self.device.wait_for_fences(fences, true, one_second)?;
-        }
+    pub fn recreate_swapchain(&mut self) -> VkResult<()> {
+        let frames = &self.ctx.swapchain.frames;
+        self.device.wait_on_semaphore(
+            &self.device.timeline_semaphore,
+            frames.iter().fold(u64::MIN, |acc, frame| {
+                acc.max(frame.prev_submit_timeline_value)
+            }),
+        )?;
 
-        let PhysicalSize { width, height } = self.ctx.window.inner_size();
-        self.ctx
-            .swapchain
-            .recreate(&self.ctx.surface, width, height)?;
+        let (width, height) = self.ctx.window.inner_size().into();
+        info!("Resize event: [{width}, {height}]");
+        self.ctx.swapchain.resize(vk::Extent2D { width, height })?;
 
         self.state.camera.aspect = width as f32 / height as f32;
 
@@ -296,8 +299,8 @@ impl<F: Framework> AppInit<F> {
         let handles = &self.state.swapchain_handles;
         for ((&handle, &image), &view) in handles
             .iter()
-            .zip(&self.ctx.swapchain.images)
-            .zip(&self.ctx.swapchain.views)
+            .zip(self.ctx.swapchain.images())
+            .zip(self.ctx.swapchain.views())
         {
             self.state
                 .texture_arena
@@ -309,7 +312,9 @@ impl<F: Framework> AppInit<F> {
     }
 
     fn draw(&mut self) -> VkResult<()> {
-        let mut frame = self.ctx.swapchain.acquire_next_image()?;
+        self.ctx.device.destroy_pending_resources();
+
+        let mut frame = self.ctx.swapchain.start_frame()?;
 
         self.framework
             .draw(&self.ctx, &mut self.state, &mut frame)?;
@@ -318,7 +323,7 @@ impl<F: Framework> AppInit<F> {
 
         if self.state.recorder.is_active() && self.state.recorder.ffmpeg_installed() {
             let res = self.device.capture_image_data(
-                &self.ctx.swapchain.images[frame.image_idx],
+                &self.ctx.swapchain.get_image(frame.image_idx),
                 self.ctx.swapchain.extent(),
                 |tex| self.state.recorder.record(tex),
             );
@@ -327,7 +332,7 @@ impl<F: Framework> AppInit<F> {
             }
         }
 
-        self.ctx.swapchain.submit_image(frame)?;
+        self.ctx.swapchain.submit_frame(frame)?;
 
         self.state.frame = self.state.frame.wrapping_add(1);
         Ok(())
@@ -419,7 +424,7 @@ impl<F: Framework> ApplicationHandler<UserEvent> for AppInit<F> {
                         let _ = self
                             .device
                             .capture_image_data(
-                                self.ctx.swapchain.get_current_image(),
+                                self.ctx.swapchain.current_image(),
                                 self.ctx.swapchain.extent(),
                                 |tex| state.recorder.screenshot(tex),
                             )
@@ -466,6 +471,7 @@ impl<F: Framework> ApplicationHandler<UserEvent> for AppInit<F> {
                 match self.draw() {
                     Ok(()) => {}
                     Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
+                        warn!("Swapchain: OUT_OF_DATE");
                         let _ = self.recreate_swapchain().map_err(|err| warn!("{err}"));
                         self.ctx.window.request_redraw();
                     }

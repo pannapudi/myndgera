@@ -32,10 +32,8 @@ impl std::ops::Deref for ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
+        self.device.destroy_resource(self.pipeline);
+        self.device.destroy_resource(self.layout);
     }
 }
 
@@ -83,7 +81,7 @@ impl ComputePipeline {
     pub fn reload(&mut self, shader_compiler: &ShaderCompiler) -> Result<()> {
         let cs_bytes = shader_compiler.compile(&self.shader_path, shaderc::ShaderKind::Compute)?;
 
-        unsafe { self.device.destroy_pipeline(self.pipeline, None) }
+        self.device.destroy_resource(self.pipeline);
 
         let mut shader_module = vk::ShaderModuleCreateInfo::default().code(cs_bytes.as_binary());
         let shader_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -337,7 +335,7 @@ impl RenderPipeline {
     ) -> Result<()> {
         let vs_bytes = shader_compiler.compile(shader_path, shaderc::ShaderKind::Vertex)?;
 
-        unsafe { self.device.destroy_pipeline(self.vertex_shader_lib, None) };
+        self.device.destroy_resource(self.vertex_shader_lib);
 
         let mut shader_module = vk::ShaderModuleCreateInfo::default().code(vs_bytes.as_binary());
         let shader_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -378,7 +376,7 @@ impl RenderPipeline {
     ) -> Result<()> {
         let fs_bytes = shader_compiler.compile(shader_path, shaderc::ShaderKind::Fragment)?;
 
-        unsafe { self.device.destroy_pipeline(self.fragment_shader_lib, None) };
+        self.device.destroy_resource(self.fragment_shader_lib);
 
         let mut shader_module = vk::ShaderModuleCreateInfo::default().code(fs_bytes.as_binary());
         let shader_stage = vk::PipelineShaderStageCreateInfo::default()
@@ -404,7 +402,7 @@ impl RenderPipeline {
     }
 
     pub fn link(&mut self) -> Result<()> {
-        unsafe { self.device.destroy_pipeline(self.pipeline, None) };
+        self.device.destroy_resource(self.pipeline);
         self.pipeline = Self::link_libraries(
             &self.device,
             &self.layout,
@@ -450,14 +448,12 @@ impl RenderPipeline {
 
 impl Drop for RenderPipeline {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_pipeline(self.vertex_input_lib, None);
-            self.device.destroy_pipeline(self.vertex_shader_lib, None);
-            self.device.destroy_pipeline(self.fragment_shader_lib, None);
-            self.device.destroy_pipeline(self.fragment_output_lib, None);
-            self.device.destroy_pipeline(self.pipeline, None);
-            self.device.destroy_pipeline_layout(self.layout, None);
-        }
+        self.device.destroy_resource(self.vertex_input_lib);
+        self.device.destroy_resource(self.vertex_shader_lib);
+        self.device.destroy_resource(self.fragment_shader_lib);
+        self.device.destroy_resource(self.fragment_output_lib);
+        self.device.destroy_resource(self.pipeline);
+        self.device.destroy_resource(self.layout);
     }
 }
 

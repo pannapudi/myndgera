@@ -19,7 +19,7 @@ pub struct ViewTarget {
 
 impl ViewTarget {
     pub fn new(ctx: &RenderContext, state: &mut AppState, format: vk::Format) -> Result<Self> {
-        let Extent2D { width, height } = ctx.swapchain.extent();
+        let Extent2D { width, height } = ctx.swapchain.extent;
         let image_info = vk::ImageCreateInfo::default()
             .format(format)
             .extent(vk::Extent3D {

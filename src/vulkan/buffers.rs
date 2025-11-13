@@ -38,11 +38,9 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-            let memory = ManuallyDrop::take(&mut self.memory);
-            self.device.dealloc_memory(memory);
-        }
+        self.device.destroy_resource(self.buffer);
+        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
+        self.device.destroy_resource(memory);
     }
 }
 
@@ -64,10 +62,8 @@ impl<T> BufferTyped<T> {
 
 impl<T> Drop for BufferTyped<T> {
     fn drop(&mut self) {
-        unsafe {
-            self.device.destroy_buffer(self.buffer, None);
-            let memory = ManuallyDrop::take(&mut self.memory);
-            self.device.dealloc_memory(memory);
-        }
+        self.device.destroy_resource(self.buffer);
+        let memory = unsafe { ManuallyDrop::take(&mut self.memory) };
+        self.device.destroy_resource(memory);
     }
 }

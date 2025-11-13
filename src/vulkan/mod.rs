@@ -1,6 +1,6 @@
 mod buffers;
+mod deletion_queue;
 mod device;
-mod frame;
 mod instance;
 mod pipeline_arena;
 mod staging;
@@ -13,7 +13,6 @@ use ash::vk;
 
 pub use buffers::*;
 pub use device::*;
-pub use frame::*;
 pub use instance::Instance;
 pub use pipeline_arena::*;
 pub use staging::*;
@@ -56,6 +55,10 @@ impl TimelineSemaphore {
             .fetch_add(to, std::sync::atomic::Ordering::Release);
         let signal_value = wait_value + to;
         (wait_value, signal_value)
+    }
+
+    pub fn next_value(&self) -> u64 {
+        self.advance(1).1
     }
 
     pub fn value(&self) -> u64 {

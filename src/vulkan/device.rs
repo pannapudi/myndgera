@@ -4,7 +4,7 @@ use gpu_allocator::{
     vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc},
 };
 use parking_lot::Mutex;
-use std::{collections::HashSet, marker::PhantomData};
+use std::{collections::HashSet, marker::PhantomData, slice};
 use std::{
     ffi::{CStr, CString},
     mem::ManuallyDrop,
@@ -18,24 +18,34 @@ use ash::{
     vk::{self, Handle},
 };
 
-use super::{Buffer, BufferTyped, Instance, ManagedImage, Surface, TimelineSemaphore};
+use super::{
+    Buffer, BufferTyped, Instance, ManagedImage, TimelineSemaphore,
+    deletion_queue::{DeletableResource, DeletionQueue},
+};
 use crate::align_to;
 
 pub struct Device {
-    pub physical_device: vk::PhysicalDevice,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
     pub device_properties: vk::PhysicalDeviceProperties,
     pub descriptor_indexing_props: vk::PhysicalDeviceDescriptorIndexingProperties<'static>,
+
     // TODO: reset it before or after each frame
     pub command_pool: vk::CommandPool,
-    pub main_queue_family_idx: u32,
+
     pub queue: vk::Queue,
+    pub main_queue_family_idx: u32,
     pub transfer_queue_family_idx: u32,
     pub allocator: Mutex<Allocator>,
-    pub device: ash::Device,
-    pub dynamic_rendering: khr::dynamic_rendering::Device,
+    pub deletion_queue: Mutex<DeletionQueue>,
+
     pub timeline_semaphore: TimelineSemaphore,
+
     pub(crate) dbg_utils: ext::debug_utils::Device,
+    pub surface_fns: ash::khr::surface::Instance,
+    pub swapchain_fns: ash::khr::swapchain::Device,
+
+    pub device: ash::Device,
+    pub physical_device: vk::PhysicalDevice,
 }
 
 impl std::ops::Deref for Device {
@@ -47,16 +57,13 @@ impl std::ops::Deref for Device {
 }
 
 impl Device {
-    pub(crate) fn create_with_queues(
-        instance: &Instance,
-        surface: &Surface,
-    ) -> Result<(Device, vk::Queue)> {
+    pub(crate) fn create_with_queues(instance: &Instance) -> Result<(Device, vk::Queue)> {
         let required_device_extensions = [
             khr::swapchain::NAME,
+            khr::swapchain_mutable_format::NAME,
             ext::graphics_pipeline_library::NAME,
             khr::pipeline_library::NAME,
-            // TODO: consider dynamic_rendering_local_read (if I ever care about mobile)
-            // host_image_copy, host_query_reset too
+            // TODO: consider adding host_image_copy, host_query_reset too
             khr::dynamic_rendering::NAME,
             ext::shader_atomic_float::NAME,
             ext::memory_priority::NAME,
@@ -89,32 +96,27 @@ impl Device {
                     use vk::QueueFlags as QF;
                     let queue_properties =
                         unsafe { instance.get_physical_device_queue_family_properties(device) };
-                    let main_queue_idx =
-                        queue_properties
-                            .iter()
-                            .enumerate()
-                            .find_map(|(family_idx, properties)| {
-                                let family_idx = family_idx as u32;
+                    let main_queue_idx = queue_properties.iter().enumerate().find_map(
+                        |(family_idx, properties)| {
+                            let family_idx = family_idx as u32;
 
-                                let queue_support = properties
-                                    .queue_flags
-                                    .contains(QF::GRAPHICS | QF::COMPUTE | QF::TRANSFER);
-                                let surface_support =
-                                    surface.get_device_surface_support(device, family_idx);
-                                (queue_support && surface_support).then_some(family_idx)
-                            });
+                            let queue_support = properties
+                                .queue_flags
+                                .contains(QF::GRAPHICS & QF::COMPUTE & QF::TRANSFER);
+                            queue_support.then_some(family_idx)
+                        },
+                    )?;
 
                     let transfer_queue_idx = queue_properties.iter().enumerate().find_map(
                         |(family_idx, properties)| {
                             let family_idx = family_idx as u32;
                             let queue_support = properties.queue_flags.contains(QF::TRANSFER)
                                 && !properties.queue_flags.contains(QF::GRAPHICS);
-                            (Some(family_idx) != main_queue_idx && queue_support)
-                                .then_some(family_idx)
+                            (family_idx != main_queue_idx && queue_support).then_some(family_idx)
                         },
                     )?;
 
-                    Some((device, main_queue_idx?, transfer_queue_idx))
+                    Some((device, main_queue_idx, transfer_queue_idx))
                 })
                 .context("Failed to find suitable device.")?;
 
@@ -129,6 +131,29 @@ impl Device {
 
         let required_device_extensions = required_device_extensions.map(|x| x.as_ptr());
 
+        let mut features12 = vk::PhysicalDeviceVulkan12Features::default()
+            .vulkan_memory_model(true)
+            .vulkan_memory_model_device_scope(true)
+            .timeline_semaphore(true)
+            .buffer_device_address(true)
+            .scalar_block_layout(true)
+            .descriptor_indexing(true)
+            .runtime_descriptor_array(true)
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .shader_storage_image_array_non_uniform_indexing(true)
+            .shader_storage_buffer_array_non_uniform_indexing(true)
+            .shader_uniform_buffer_array_non_uniform_indexing(true)
+            .descriptor_binding_storage_image_update_after_bind(true)
+            .descriptor_binding_sampled_image_update_after_bind(true)
+            .descriptor_binding_partially_bound(true)
+            .descriptor_binding_variable_descriptor_count(true)
+            .descriptor_binding_update_unused_while_pending(true);
+
+        let mut features13 = vk::PhysicalDeviceVulkan13Features::default()
+            .maintenance4(true)
+            .synchronization2(true)
+            .dynamic_rendering(true);
+
         let mut memory_priority_feature =
             vk::PhysicalDeviceMemoryPriorityFeaturesEXT::default().memory_priority(true);
         let mut pageable_device_memory_feature =
@@ -137,38 +162,13 @@ impl Device {
         let mut swapchain_maintenance_feature =
             vk::PhysicalDeviceSwapchainMaintenance1FeaturesEXT::default()
                 .swapchain_maintenance1(true);
-        let mut timeline_semaphore_feature =
-            vk::PhysicalDeviceTimelineSemaphoreFeatures::default().timeline_semaphore(true);
-        let mut feature_virtual_pointers = vk::PhysicalDeviceVariablePointersFeatures::default()
-            .variable_pointers(true)
-            .variable_pointers_storage_buffer(true);
-        let mut feature_scalar_layout =
-            vk::PhysicalDeviceScalarBlockLayoutFeatures::default().scalar_block_layout(true);
         let mut feature_atomic_float = vk::PhysicalDeviceShaderAtomicFloatFeaturesEXT::default()
             .shader_image_float32_atomics(true);
         let mut feature_dynamic_state =
             vk::PhysicalDeviceExtendedDynamicState2FeaturesEXT::default();
-        let mut feature_descriptor_indexing =
-            vk::PhysicalDeviceDescriptorIndexingFeatures::default()
-                .runtime_descriptor_array(true)
-                .shader_sampled_image_array_non_uniform_indexing(true)
-                .shader_storage_image_array_non_uniform_indexing(true)
-                .shader_storage_buffer_array_non_uniform_indexing(true)
-                .shader_uniform_buffer_array_non_uniform_indexing(true)
-                .descriptor_binding_storage_image_update_after_bind(true)
-                .descriptor_binding_sampled_image_update_after_bind(true)
-                .descriptor_binding_partially_bound(true)
-                .descriptor_binding_variable_descriptor_count(true)
-                .descriptor_binding_update_unused_while_pending(true);
-        let mut feature_buffer_device_address =
-            vk::PhysicalDeviceBufferDeviceAddressFeatures::default().buffer_device_address(true);
-        let mut feature_synchronization2 =
-            vk::PhysicalDeviceSynchronization2Features::default().synchronization2(true);
         let mut feature_pipeline_library =
             vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default()
                 .graphics_pipeline_library(true);
-        let mut feature_dynamic_rendering =
-            vk::PhysicalDeviceDynamicRenderingFeatures::default().dynamic_rendering(true);
 
         let mut features = vk::PhysicalDeviceFeatures::default()
             .shader_storage_image_write_without_format(true)
@@ -180,19 +180,14 @@ impl Device {
 
         let mut default_features = vk::PhysicalDeviceFeatures2::default()
             .features(features)
+            .push_next(&mut features12)
+            .push_next(&mut features13)
             .push_next(&mut memory_priority_feature)
             .push_next(&mut pageable_device_memory_feature)
             .push_next(&mut swapchain_maintenance_feature)
-            .push_next(&mut timeline_semaphore_feature)
-            .push_next(&mut feature_virtual_pointers)
-            .push_next(&mut feature_descriptor_indexing)
-            .push_next(&mut feature_buffer_device_address)
-            .push_next(&mut feature_synchronization2)
-            .push_next(&mut feature_scalar_layout)
             .push_next(&mut feature_dynamic_state)
             .push_next(&mut feature_pipeline_library)
-            .push_next(&mut feature_atomic_float)
-            .push_next(&mut feature_dynamic_rendering);
+            .push_next(&mut feature_atomic_float);
 
         let device_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
@@ -201,8 +196,6 @@ impl Device {
         let device = unsafe { instance.inner.create_device(pdevice, &device_info, None) }?;
 
         let memory_properties = unsafe { instance.get_physical_device_memory_properties(pdevice) };
-
-        let dynamic_rendering = khr::dynamic_rendering::Device::new(instance, &device);
 
         let allocator = Allocator::new(&AllocatorCreateDesc {
             instance: instance.inner.clone(),
@@ -232,9 +225,10 @@ impl Device {
         };
 
         let dbg_utils = ext::debug_utils::Device::new(&instance.inner, &device);
+        let surface_fns = ash::khr::surface::Instance::new(&instance.entry, instance);
+        let swapchain_fns = ash::khr::swapchain::Device::new(instance, &device);
 
-        // Initialize timeline semaphore with (numFrames - 1) to allow concurrent frame submission. See details in README.md
-        let timeline_semaphore = TimelineSemaphore::new(&device, None)?;
+        let timeline_semaphore = TimelineSemaphore::new(&device, Some(3))?;
         name_object(&dbg_utils, *timeline_semaphore, "Timeline Semaphore");
 
         let device = Device {
@@ -247,10 +241,12 @@ impl Device {
             command_pool,
             memory_properties,
             allocator: Mutex::new(allocator),
+            deletion_queue: Mutex::new(DeletionQueue::new()),
             timeline_semaphore,
             device,
-            dynamic_rendering,
             dbg_utils,
+            surface_fns,
+            swapchain_fns,
         };
         let transfer_queue = unsafe { device.get_device_queue(transfer_queue_family_idx, 0) };
 
@@ -268,6 +264,25 @@ impl Device {
         timeout: u64,
     ) -> VkResult<()> {
         unsafe { self.device.wait_for_fences(fences, wait_all, timeout) }
+    }
+
+    pub fn wait_on_semaphore(&self, &semaphore: &vk::Semaphore, wait_value: u64) -> VkResult<()> {
+        unsafe {
+            self.device.wait_semaphores(
+                &vk::SemaphoreWaitInfo::default()
+                    .semaphores(&[semaphore])
+                    .values(&[wait_value]),
+                u64::MAX,
+            )
+        }
+    }
+
+    pub fn wait_semaphores(
+        &self,
+        wait_info: vk::SemaphoreWaitInfo,
+        timeout_ns: u64,
+    ) -> VkResult<()> {
+        unsafe { self.device.wait_semaphores(&wait_info, timeout_ns) }
     }
 
     pub fn name_object(&self, handle: impl Handle, name: &str) {
@@ -306,7 +321,7 @@ impl Device {
         &self,
         info: &vk::ImageCreateInfo,
         usage: MemoryLocation,
-    ) -> Result<(vk::Image, Allocation)> {
+    ) -> VkResult<(vk::Image, Allocation)> {
         let image = unsafe { self.device.create_image(info, None)? };
         let memory_reqs = unsafe { self.get_image_memory_requirements(image) };
         let linear = info.tiling == vk::ImageTiling::LINEAR;
@@ -365,8 +380,8 @@ impl Device {
     }
 
     pub fn destroy_image(&self, image: vk::Image, memory: Allocation) {
-        unsafe { self.device.destroy_image(image, None) };
-        self.dealloc_memory(memory);
+        self.destroy_resource(image);
+        self.destroy_resource(memory);
     }
 
     pub fn create_2d_view(
@@ -448,7 +463,9 @@ impl Device {
         self: &Arc<Self>,
         callbk: impl FnOnce(&Arc<Self>, vk::CommandBuffer) -> anyhow::Result<()>,
     ) -> Result<()> {
-        let fence = self.create_fence(vk::FenceCreateFlags::empty())?;
+        let semaphore = self.create_timeline_semaphore(None)?;
+        let signal_value = semaphore.next_value();
+
         let command_buffer = unsafe {
             self.allocate_command_buffers(
                 &vk::CommandBufferAllocateInfo::default()
@@ -467,14 +484,22 @@ impl Device {
 
         self.end_command_buffer(&command_buffer)?;
 
-        let submit_info =
-            vk::SubmitInfo::default().command_buffers(std::slice::from_ref(&command_buffer));
+        let cbuff_info = vk::CommandBufferSubmitInfo::default().command_buffer(command_buffer);
+        self.queue_submit(
+            &self.queue,
+            &[vk::SubmitInfo2::default()
+                .signal_semaphore_infos(slice::from_ref(
+                    &vk::SemaphoreSubmitInfo::default()
+                        .semaphore(*semaphore)
+                        .value(signal_value),
+                ))
+                .command_buffer_infos(std::slice::from_ref(&cbuff_info))],
+            None,
+        )?;
+        self.wait_on_semaphore(&semaphore, signal_value)?;
 
-        self.queue_submit(&self.queue, &[submit_info], Some(fence))?;
-        self.wait_for_fences(&[fence], true, u64::MAX)?;
-
-        unsafe { self.destroy_fence(fence, None) };
         self.free_command_buffers(&[command_buffer]);
+        self.destroy_resource(semaphore);
 
         Ok(())
     }
@@ -485,25 +510,40 @@ impl Device {
         usage: MemoryLocation,
         linear: bool,
         resource: AllocationResource,
-    ) -> Result<Allocation, gpu_allocator::AllocationError> {
+    ) -> VkResult<Allocation> {
         let mut allocator = self.allocator.lock();
         let allocation_scheme = match resource {
             AllocationResource::Image(image) => AllocationScheme::DedicatedImage(image),
             AllocationResource::Buffer(buffer) => AllocationScheme::DedicatedBuffer(buffer),
             AllocationResource::None => AllocationScheme::GpuAllocatorManaged,
         };
-        allocator.allocate(&AllocationCreateDesc {
-            name: &format!("Memory: {usage:?}"),
-            requirements: memory_reqs,
-            location: usage,
-            linear,
-            allocation_scheme,
-        })
+        allocator
+            .allocate(&AllocationCreateDesc {
+                name: &format!("Memory: {usage:?}"),
+                requirements: memory_reqs,
+                location: usage,
+                linear,
+                allocation_scheme,
+            })
+            .map_err(|err| {
+                tracing::error!("{err}");
+                vk::Result::ERROR_OUT_OF_POOL_MEMORY
+            })
     }
 
     pub fn dealloc_memory(&self, memory: Allocation) {
         let mut allocator = self.allocator.lock();
         let _ = allocator.free(memory);
+    }
+
+    pub fn destroy_resource(&self, resource: impl Into<DeletableResource>) {
+        let mut queue = self.deletion_queue.lock();
+        queue.queue_deletion_after(resource, self.timeline_semaphore.value());
+    }
+
+    pub fn destroy_pending_resources(&self) {
+        let mut queue = self.deletion_queue.lock();
+        queue.destroy_ready(self);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -703,6 +743,17 @@ impl Device {
         })
     }
 
+    pub fn acquire_next_image(
+        &self,
+        &swapchain: &vk::SwapchainKHR,
+        &semaphore: &vk::Semaphore,
+    ) -> VkResult<(u32, bool)> {
+        unsafe {
+            self.swapchain_fns
+                .acquire_next_image(swapchain, u64::MAX, semaphore, vk::Fence::null())
+        }
+    }
+
     pub fn draw(
         &self,
         &cbuff: &vk::CommandBuffer,
@@ -746,12 +797,34 @@ impl Device {
     pub fn queue_submit(
         &self,
         &queue: &vk::Queue,
-        submits: &[vk::SubmitInfo],
+        submits: &[vk::SubmitInfo2],
         fence: Option<vk::Fence>,
     ) -> VkResult<()> {
         unsafe {
             self.device
-                .queue_submit(queue, submits, fence.unwrap_or(vk::Fence::null()))
+                .queue_submit2(queue, submits, fence.unwrap_or(vk::Fence::null()))
+        }
+    }
+
+    pub fn queue_present(
+        &self,
+        &queue: &vk::Queue,
+        &swapchain: &vk::SwapchainKHR,
+        &render_finished_semaphore: &vk::Semaphore,
+        fence: &vk::Fence,
+        image_idx: usize,
+    ) -> VkResult<bool> {
+        let mut fence_info =
+            vk::SwapchainPresentFenceInfoEXT::default().fences(slice::from_ref(fence));
+        unsafe {
+            self.swapchain_fns.queue_present(
+                queue,
+                &vk::PresentInfoKHR::default()
+                    .swapchains(&[swapchain])
+                    .image_indices(&[image_idx as u32])
+                    .wait_semaphores(&[render_finished_semaphore])
+                    .push_next(&mut fence_info),
+            )
         }
     }
 
@@ -827,11 +900,11 @@ impl Device {
     }
 
     pub fn begin_rendering(&self, &cbuff: &vk::CommandBuffer, info: &vk::RenderingInfo) {
-        unsafe { self.dynamic_rendering.cmd_begin_rendering(cbuff, info) };
+        unsafe { self.device.cmd_begin_rendering(cbuff, info) };
     }
 
     pub fn end_rendering(&self, &cbuff: &vk::CommandBuffer) {
-        unsafe { self.dynamic_rendering.cmd_end_rendering(cbuff) };
+        unsafe { self.device.cmd_end_rendering(cbuff) };
     }
 
     pub fn get_info(&self) -> RendererInfo {
@@ -869,6 +942,10 @@ impl Device {
 impl Drop for Device {
     fn drop(&mut self) {
         unsafe {
+            {
+                let mut queue = self.deletion_queue.lock();
+                queue.destroy_all_immediate(self);
+            }
             self.device
                 .destroy_semaphore(self.timeline_semaphore.inner, None);
             self.device.destroy_command_pool(self.command_pool, None);
@@ -925,52 +1002,53 @@ fn name_object(device: &ext::debug_utils::Device, handle: impl Handle, name: &st
     };
 }
 
+// WARN: They're all wrong! ...probably
 fn get_pipeline_stage_flags(layout: vk::ImageLayout) -> vk::PipelineStageFlags2 {
+    use vk::ImageLayout as IL;
     match layout {
-        vk::ImageLayout::UNDEFINED => vk::PipelineStageFlags2::TOP_OF_PIPE,
-        vk::ImageLayout::PREINITIALIZED => vk::PipelineStageFlags2::HOST,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL | vk::ImageLayout::TRANSFER_SRC_OPTIMAL => {
-            vk::PipelineStageFlags2::TRANSFER
-        }
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
+        IL::UNDEFINED => vk::PipelineStageFlags2::NONE,
+        IL::PREINITIALIZED => vk::PipelineStageFlags2::HOST,
+        IL::TRANSFER_DST_OPTIMAL | IL::TRANSFER_SRC_OPTIMAL => vk::PipelineStageFlags2::TRANSFER,
+        IL::COLOR_ATTACHMENT_OPTIMAL | IL::ATTACHMENT_OPTIMAL => {
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT
         }
-        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL => {
+        IL::DEPTH_ATTACHMENT_OPTIMAL => {
             vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS
                 | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS
         }
-        vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR => {
+        IL::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR => {
             vk::PipelineStageFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_KHR
         }
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+        IL::SHADER_READ_ONLY_OPTIMAL => {
             vk::PipelineStageFlags2::VERTEX_SHADER | vk::PipelineStageFlags2::FRAGMENT_SHADER
         }
-        vk::ImageLayout::PRESENT_SRC_KHR => vk::PipelineStageFlags2::BOTTOM_OF_PIPE,
-        vk::ImageLayout::GENERAL => vk::PipelineStageFlags2::ALL_COMMANDS,
+        IL::PRESENT_SRC_KHR => vk::PipelineStageFlags2::ALL_COMMANDS,
+        IL::GENERAL => vk::PipelineStageFlags2::ALL_COMMANDS,
         _ => panic!("Unknown layout for pipeline stage: {layout:?}!"),
     }
 }
 
 fn get_access_flags(layout: vk::ImageLayout) -> vk::AccessFlags2 {
+    use vk::ImageLayout as IL;
     match layout {
-        vk::ImageLayout::UNDEFINED | vk::ImageLayout::PRESENT_SRC_KHR => vk::AccessFlags2::empty(),
-        vk::ImageLayout::PREINITIALIZED => vk::AccessFlags2::HOST_WRITE,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => {
+        IL::UNDEFINED | IL::PRESENT_SRC_KHR => vk::AccessFlags2::empty(),
+        IL::PREINITIALIZED => vk::AccessFlags2::HOST_WRITE,
+        IL::COLOR_ATTACHMENT_OPTIMAL | IL::ATTACHMENT_OPTIMAL => {
             vk::AccessFlags2::COLOR_ATTACHMENT_READ | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE
         }
-        vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL => {
+        IL::DEPTH_ATTACHMENT_OPTIMAL => {
             vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ
                 | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
         }
-        vk::ImageLayout::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR => {
+        IL::FRAGMENT_SHADING_RATE_ATTACHMENT_OPTIMAL_KHR => {
             vk::AccessFlags2::FRAGMENT_SHADING_RATE_ATTACHMENT_READ_KHR
         }
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => {
+        IL::SHADER_READ_ONLY_OPTIMAL => {
             vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::INPUT_ATTACHMENT_READ
         }
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => vk::AccessFlags2::TRANSFER_READ,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL => vk::AccessFlags2::TRANSFER_WRITE,
-        vk::ImageLayout::GENERAL => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
+        IL::TRANSFER_SRC_OPTIMAL => vk::AccessFlags2::TRANSFER_READ,
+        IL::TRANSFER_DST_OPTIMAL => vk::AccessFlags2::TRANSFER_WRITE,
+        IL::GENERAL => vk::AccessFlags2::SHADER_READ | vk::AccessFlags2::SHADER_WRITE,
         _ => panic!("Unknown layout for access mask: {layout:?}"),
     }
 }

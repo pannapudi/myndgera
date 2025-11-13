@@ -166,7 +166,7 @@ impl Framework for Trig {
             ..Default::default()
         };
         let fragment_output_desc = FragmentOutputDesc {
-            surface_format: ctx.swapchain.format(),
+            surface_format: ctx.swapchain.format,
             ..Default::default()
         };
         let push_constant_range = vk::PushConstantRange::default()
@@ -403,8 +403,8 @@ impl Framework for Trig {
         {
             let texture_arena = &mut state.texture_arena;
             frame.begin_rendering(
-                &ctx.swapchain.images[frame.image_idx],
-                &ctx.swapchain.views[frame.image_idx],
+                &ctx.swapchain.get_image(frame.image_idx),
+                &ctx.swapchain.get_view(frame.image_idx),
                 vk::AttachmentLoadOp::DONT_CARE,
                 [0., 0.025, 0.025, 1.0],
             );

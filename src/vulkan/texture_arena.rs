@@ -487,7 +487,7 @@ impl TextureArena {
         }
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<()> {
+    pub fn resize(&mut self, width: u32, height: u32) -> VkResult<()> {
         for (handle, &factor) in self.screen_sized_images.iter() {
             let image = &mut self.images[handle];
             let Some(info) = image.info.as_mut() else {

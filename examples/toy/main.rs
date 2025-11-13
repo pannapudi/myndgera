@@ -3,16 +3,17 @@ use ash::{
     prelude::VkResult,
     vk::{self, Extent2D},
 };
-use glam::{Vec2, Vec3, vec2};
+use dolly::prelude::YawPitch;
+use glam::{Vec2, Vec3, vec2, vec3};
 use myndgera::{
-    App, AppState, Framework, RenderContext,
+    App, AppState, Camera, FIXED_TIME_STEP, Framework, KeyboardMap, RenderContext,
     vulkan::{
         FragmentOutputDesc, FragmentShaderDesc, FrameGuard, RenderHandle, VertexInputDesc,
         VertexShaderDesc,
     },
 };
 use std::error::Error;
-use winit::event_loop::EventLoop;
+use winit::{event_loop::EventLoop, keyboard::KeyCode};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -24,6 +25,7 @@ struct PushConstant {
     time: f32,
     time_delta: f32,
     frame: u32,
+    camera_buffer: u64,
 }
 
 struct Trig {
@@ -33,6 +35,8 @@ struct Trig {
 
 impl Framework for Trig {
     fn init(ctx: &RenderContext, state: &mut AppState) -> Result<Self> {
+        state.camera = Camera::new(vec3(0., 0., -3.), 180.0, 0.0);
+
         let push_constant = PushConstant {
             pos: Vec3::from([0.; 3]),
             resolution: vec2(
@@ -44,6 +48,7 @@ impl Framework for Trig {
             time: state.time,
             frame: state.frame,
             time_delta: 1. / 60.,
+            camera_buffer: state.camera_uniform_gpu.address,
         };
         let vertex_shader_desc = VertexShaderDesc {
             shader_path: "examples/toy/shader.vert".into(),
@@ -54,7 +59,7 @@ impl Framework for Trig {
             ..Default::default()
         };
         let fragment_output_desc = FragmentOutputDesc {
-            surface_format: ctx.swapchain.format(),
+            surface_format: ctx.swapchain.format,
             ..Default::default()
         };
         let push_constant_range = vk::PushConstantRange::default()
@@ -72,6 +77,20 @@ impl Framework for Trig {
             &[push_constant_range],
             &[state.texture_arena.sampled_set_layout],
         )?;
+
+        state.key_map = {
+            use winit::keyboard::KeyCode::*;
+            KeyboardMap::new()
+                .bind(KeyW, ("move_fwd", 1.0))
+                .bind(KeyS, ("move_fwd", -1.0))
+                .bind(KeyD, ("move_right", 1.0))
+                .bind(KeyA, ("move_right", -1.0))
+                .bind(KeyQ, ("move_up", -1.0))
+                .bind(KeyE, ("move_up", 1.0))
+                .bind(ShiftLeft, ("boost", 1.0))
+                .bind(ControlLeft, ("boost", -1.0))
+        };
+
         Ok(Self {
             push_constant,
             render_pipeline,
@@ -85,8 +104,8 @@ impl Framework for Trig {
         frame: &mut FrameGuard,
     ) -> VkResult<()> {
         frame.begin_rendering(
-            &ctx.swapchain.images[frame.image_idx],
-            &ctx.swapchain.views[frame.image_idx],
+            &ctx.swapchain.get_image(frame.image_idx),
+            &ctx.swapchain.get_view(frame.image_idx),
             vk::AttachmentLoadOp::CLEAR,
             [1., 1., 1., 1.],
         );
@@ -118,6 +137,7 @@ impl Framework for Trig {
         state: &mut AppState,
         _cbuff: &vk::CommandBuffer,
     ) -> Result<()> {
+        // dbg!(&state.camera);
         state.input.process_position(&mut self.push_constant.pos);
         let Extent2D { width, height } = ctx.swapchain.extent;
         self.push_constant.resolution.x = width as f32;
@@ -128,19 +148,50 @@ impl Framework for Trig {
         self.push_constant.mouse = state.input.mouse_state.screen_position / 2.;
         self.push_constant.mouse_pressed = state.input.mouse_state.left_held() as u32;
 
-        if state
-            .input
-            .keyboard_state
-            .is_down(winit::keyboard::KeyCode::F6)
-        {
-            println!("{:?}", self.push_constant);
+        if state.input.mouse_state.left_held() {
+            let sensitivity = 0.5;
+            state.camera.rig.driver_mut::<YawPitch>().rotate_yaw_pitch(
+                -sensitivity * state.input.mouse_state.delta.x,
+                -sensitivity * state.input.mouse_state.delta.y,
+            );
         }
+
+        let dt = FIXED_TIME_STEP as f32;
+        let key_map = state.key_map.map(&state.input.keyboard_state);
+        let translation = Vec3::new(
+            key_map["move_right"],
+            key_map["move_up"],
+            -key_map["move_fwd"],
+        );
+
+        let rotation: glam::Quat = state.camera.rig.final_transform.rotation.into();
+        let move_vec = rotation * translation.clamp_length_max(1.0) * 4.0f32.powf(key_map["boost"]);
+
+        state
+            .camera
+            .rig
+            .driver_mut::<dolly::drivers::Position>()
+            .translate(move_vec * dt * 5.0);
+
+        let pos = self.push_constant.pos;
+        if state.input.keyboard_state.was_just_pressed(KeyCode::F6) {
+            println!("Posiiton: [{}, {}, {}]", pos.x, pos.y, pos.z);
+            println!(
+                "Mouse: [{}, {}]",
+                self.push_constant.mouse.x, self.push_constant.mouse.y
+            );
+            let pos = state.camera.rig.final_transform.position;
+            println!("Camera pos: {pos:?}");
+            println!();
+        }
+
         Ok(())
     }
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let event_loop = EventLoop::with_user_event().build()?;
+    let event_loop = &mut EventLoop::with_user_event();
+    let event_loop = event_loop.build()?;
 
     let mut app = App::<Trig>::new(event_loop.create_proxy());
     event_loop.run_app(&mut app)?;

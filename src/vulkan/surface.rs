@@ -4,7 +4,7 @@ use anyhow::Result;
 use ash::{khr, vk};
 use winit::raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 
-use super::Device;
+use super::instance::Instance;
 
 pub struct Surface {
     pub loader: khr::surface::Instance,
@@ -27,7 +27,7 @@ pub struct SurfaceInfo {
 
 impl Surface {
     pub fn new(
-        instance: &crate::vulkan::Instance,
+        instance: &Instance,
         handle: &(impl HasDisplayHandle + HasWindowHandle),
     ) -> Result<Self> {
         let inner = unsafe {
@@ -45,10 +45,13 @@ impl Surface {
         Ok(Surface { inner, loader })
     }
 
-    pub fn get_device_capabilities(&self, device: &Device) -> vk::SurfaceCapabilitiesKHR {
+    pub fn get_device_capabilities(
+        &self,
+        device: &vk::PhysicalDevice,
+    ) -> vk::SurfaceCapabilitiesKHR {
         unsafe {
             self.loader
-                .get_physical_device_surface_capabilities(device.physical_device, self.inner)
+                .get_physical_device_surface_capabilities(*device, self.inner)
                 .unwrap()
         }
     }
@@ -69,23 +72,22 @@ impl Surface {
         }
     }
 
-    pub fn info(&self, device: &Device) -> SurfaceInfo {
-        let physical_device = device.physical_device;
+    pub fn info(&self, device: &vk::PhysicalDevice) -> SurfaceInfo {
         let formats = unsafe {
             self.loader
-                .get_physical_device_surface_formats(physical_device, self.inner)
+                .get_physical_device_surface_formats(*device, self.inner)
                 .unwrap()
         };
 
         let capabilities = unsafe {
             self.loader
-                .get_physical_device_surface_capabilities(physical_device, self.inner)
+                .get_physical_device_surface_capabilities(*device, self.inner)
                 .unwrap()
         };
 
         let present_modes = unsafe {
             self.loader
-                .get_physical_device_surface_present_modes(physical_device, self.inner)
+                .get_physical_device_surface_present_modes(*device, self.inner)
                 .unwrap()
         };
 

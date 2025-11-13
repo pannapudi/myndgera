@@ -1,337 +1,320 @@
-use std::{slice, sync::Arc, time::Duration};
+use std::{slice, sync::Arc};
 
+use anyhow::{Context, Result, ensure};
+use arrayvec::ArrayVec;
 use ash::{
-    khr,
     prelude::VkResult,
     vk::{self, Extent2D},
 };
 use tracing::debug;
+use winit::window::Window;
 
-use super::{BASE_IMAGE_RANGE, Device, Frame, FrameGuard, ImageDimensions, Surface};
+use super::{Device, ImageDimensions, Instance, Surface};
+
+const MAX_IMAGE_CAP: usize = 16;
+
+pub struct Frame {
+    image_available_semaphore: vk::Semaphore,
+    render_finished_semaphore: vk::Semaphore,
+    present_finished: vk::Fence,
+
+    pub prev_submit_timeline_value: u64,
+}
+
+impl Frame {
+    fn new(device: &Device, idx: u64) -> VkResult<Self> {
+        let image_available_semaphore = device.create_semaphore()?;
+        device.name_object(
+            image_available_semaphore,
+            &format!("Image Available Semaphore {idx}"),
+        );
+        let render_finished_semaphore = device.create_semaphore()?;
+        device.name_object(
+            render_finished_semaphore,
+            &format!("Render Finished Semaphore {idx}"),
+        );
+        let present_finished = device.create_fence(vk::FenceCreateFlags::SIGNALED)?;
+        device.name_object(present_finished, &format!("Present Finished Fence {idx}"));
+
+        Ok(Frame {
+            image_available_semaphore,
+            render_finished_semaphore,
+            present_finished,
+            prev_submit_timeline_value: idx,
+        })
+    }
+}
 
 pub struct Swapchain {
-    pub format: vk::SurfaceFormatKHR,
+    pub surface: Surface,
+    pub format: vk::Format,
     pub present_mode: vk::PresentModeKHR,
     pub extent: vk::Extent2D,
-    pub frames: Vec<Option<Frame>>,
-    pub views: Vec<vk::ImageView>,
-    pub images: Vec<vk::Image>,
-    pub loader: khr::swapchain::Device,
-    pub inner: vk::SwapchainKHR,
-    reclaimed_semaphores: Vec<vk::Semaphore>,
-    current_frame: usize,
+
+    pub frames: ArrayVec<Frame, MAX_IMAGE_CAP>,
+    next_sync_idx: usize,
+    guts: InnerGuts,
     device: Arc<Device>,
 }
 
 impl Swapchain {
-    pub fn format(&self) -> vk::Format {
-        self.format.format
+    pub fn current_frame(&self) -> &Frame {
+        &self.frames[self.next_sync_idx]
+    }
+
+    pub fn current_image(&self) -> &vk::Image {
+        &self.guts.images[self.next_sync_idx]
+    }
+
+    pub fn image_dimensions(&self) -> ImageDimensions {
+        let Extent2D { width, height } = self.extent();
+        let memory_reqs = unsafe {
+            self.device
+                .get_image_memory_requirements(self.guts.images[0])
+        };
+        ImageDimensions::new(width as _, height as _, memory_reqs.alignment)
+    }
+
+    pub fn new(device: &Arc<Device>, instance: &Instance, window: &Window) -> Result<Self> {
+        let surface = Surface::new(instance, &window)?;
+        let surface_info = surface.info(&device.physical_device);
+
+        let extent = match surface_info.capabilities.current_extent {
+            vk::Extent2D {
+                width: u32::MAX,
+                height: u32::MAX,
+            } => {
+                let (width, height) = window.inner_size().into();
+                vk::Extent2D { width, height }
+            }
+
+            current => current,
+        };
+        debug!("Swapchain extent: {:?}", extent);
+
+        let present_mode = surface_info
+            .present_modes
+            .into_iter()
+            .max_by_key(|&mode| match mode {
+                vk::PresentModeKHR::FIFO => 1,
+                vk::PresentModeKHR::FIFO_RELAXED => 2,
+                _ => 0,
+            })
+            .context("Selecting supported present mode")?;
+        debug!("Swapchain present mode: {:?}", present_mode);
+
+        let format = surface_info
+            .formats
+            .into_iter()
+            .filter(|format| format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .filter(|format| {
+                let props = instance.get_format_properties(&device.physical_device, format.format);
+                props.optimal_tiling_features.contains(
+                    vk::FormatFeatureFlags::STORAGE_IMAGE | vk::FormatFeatureFlags::SAMPLED_IMAGE,
+                )
+            })
+            .map(|format| format.format)
+            .max_by_key(|&format| match format {
+                vk::Format::R8G8B8A8_SRGB => 15,
+                vk::Format::B8G8R8A8_SRGB => 14,
+                vk::Format::A8B8G8R8_SRGB_PACK32 => 13,
+
+                vk::Format::R8G8B8A8_UNORM => 5,
+                vk::Format::B8G8R8A8_UNORM => 4,
+                vk::Format::A8B8G8R8_UNORM_PACK32 => 3,
+                _ => 0,
+            })
+            .context("Selecting supported swapchain format")?;
+
+        let num_images = (surface_info.capabilities.min_image_count + 1).min(MAX_IMAGE_CAP as u32);
+        debug!("Swapchain image count: {:?}", num_images);
+
+        ensure!(
+            surface_info
+                .capabilities
+                .supported_composite_alpha
+                .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        );
+
+        let guts = InnerGuts::new(
+            device,
+            &surface,
+            format,
+            present_mode,
+            extent,
+            num_images,
+            None,
+        )?;
+
+        let frames = (0..guts.images.len())
+            .map(|i| Frame::new(device, i as u64))
+            .collect::<VkResult<ArrayVec<_, MAX_IMAGE_CAP>>>()?;
+
+        Ok(Self {
+            surface,
+            format,
+            present_mode,
+            extent,
+
+            guts,
+            frames,
+            next_sync_idx: 0,
+            device: device.clone(),
+        })
+    }
+
+    pub fn resize(&mut self, new_extent: vk::Extent2D) -> VkResult<()> {
+        if self.extent == new_extent {
+            return Ok(());
+        }
+
+        let (min, max) = {
+            let caps = self
+                .surface
+                .get_device_capabilities(&self.device.physical_device);
+            (caps.min_image_extent, caps.max_image_extent)
+        };
+        if (new_extent.width < min.width || new_extent.width > max.width || new_extent.width == 0)
+            || (new_extent.height < min.height
+                || new_extent.height > max.height
+                || new_extent.height == 0)
+        {
+            self.extent = vk::Extent2D {
+                width: 0,
+                height: 0,
+            };
+            return Err(vk::Result::ERROR_OUT_OF_DATE_KHR);
+        }
+
+        let new_swapchain = InnerGuts::new(
+            &self.device,
+            &self.surface,
+            self.format,
+            self.present_mode,
+            new_extent,
+            self.guts.images.len() as u32,
+            Some(&self.guts),
+        )?;
+
+        self.extent = new_extent;
+        let old_swapchain = std::mem::replace(&mut self.guts, new_swapchain);
+
+        for view in old_swapchain.views {
+            self.device.destroy_resource(view);
+        }
+        self.device.destroy_resource(old_swapchain.swapchain);
+
+        Ok(())
     }
 
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
     }
 
-    pub fn image_dimensions(&self) -> ImageDimensions {
-        let Extent2D { width, height } = self.extent();
-        let memory_reqs = unsafe { self.device.get_image_memory_requirements(self.images[0]) };
-        ImageDimensions::new(width as _, height as _, memory_reqs.alignment)
+    pub fn images(&self) -> &[vk::Image] {
+        &self.guts.images
     }
 
-    pub fn new(
-        device: &Arc<Device>,
-        surface: &Surface,
-        swapchain_loader: khr::swapchain::Device,
-        width: u32,
-        height: u32,
-    ) -> VkResult<Self> {
-        let surface_info = surface.info(device);
-
-        let format = surface_info
-            .formats
-            .iter()
-            .find(|format| format.format == vk::Format::B8G8R8A8_UNORM)
-            .unwrap_or(&surface_info.formats[0]);
-        debug!("Swapchain format: {:?}", format);
-
-        let present_mode = surface_info
-            .present_modes
-            .iter()
-            .cloned()
-            .find(|&present_mode| present_mode == vk::PresentModeKHR::FIFO)
-            .unwrap_or(surface_info.present_modes[0]);
-        debug!("Swapchain present mode: {:?}", present_mode);
-
-        let capabilities = surface_info.capabilities;
-
-        let extent = {
-            let max = capabilities.max_image_extent;
-            let min = capabilities.min_image_extent;
-            let width = width.clamp(min.width, max.width);
-            let height = height.clamp(min.height, max.height);
-            vk::Extent2D { width, height }
-        };
-        debug!("Swapchain extent: {:?}", extent);
-
-        // Swapchain image count
-        let image_count = 3.clamp(capabilities.min_image_count, capabilities.max_image_count);
-        debug!("Swapchain image count: {:?}", image_count);
-
-        let queue_family_index = [device.main_queue_family_idx];
-
-        assert!(
-            capabilities
-                .supported_composite_alpha
-                .contains(vk::CompositeAlphaFlagsKHR::OPAQUE)
-        );
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(surface.inner)
-            .image_format(format.format)
-            .image_usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-            )
-            .image_extent(extent)
-            .image_color_space(format.color_space)
-            .min_image_count(image_count)
-            .image_array_layers(1)
-            .queue_family_indices(&queue_family_index)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(present_mode)
-            .clipped(true);
-        let swapchain = unsafe { swapchain_loader.create_swapchain(&swapchain_create_info, None)? };
-
-        let images = unsafe { swapchain_loader.get_swapchain_images(swapchain)? };
-        let views = images
-            .iter()
-            .map(|img| device.create_2d_view(img, format.format, 0))
-            .collect::<VkResult<Vec<_>>>()?;
-
-        for (i, (&image, &view)) in std::iter::zip(&images, &views).enumerate() {
-            device.name_object(image, &format!("Swapchain Image {i}"));
-            device.name_object(view, &format!("Swapchain View {i}"));
-        }
-
-        let frames = (0..images.len())
-            .map(|_| Some(Frame::new(device)).transpose())
-            .collect::<VkResult<Vec<Option<Frame>>>>()?;
-
-        Ok(Self {
-            device: device.clone(),
-            loader: swapchain_loader,
-            inner: swapchain,
-            present_mode,
-            extent,
-            format: *format,
-            frames,
-            images,
-            views,
-            current_frame: 0,
-            reclaimed_semaphores: vec![],
-        })
+    pub fn views(&self) -> &[vk::ImageView] {
+        &self.guts.views
     }
 
-    pub fn recreate(&mut self, surface: &Surface, width: u32, height: u32) -> VkResult<()> {
-        debug!("Surface has been recreated: {{ width: {width}, height: {height} }}");
-
-        let info = surface.info(&self.device);
-        let capabilities = info.capabilities;
-
-        for view in self.views.iter() {
-            unsafe { self.device.destroy_image_view(*view, None) };
-        }
-        let old_swapchain = self.inner;
-
-        let queue_family_index = [self.device.main_queue_family_idx];
-
-        self.extent = {
-            let max = capabilities.max_image_extent;
-            let min = capabilities.min_image_extent;
-            let width = width.min(max.width).max(min.width);
-            let height = height.min(max.height).max(min.height);
-            vk::Extent2D { width, height }
-        };
-
-        let swapchain_create_info = vk::SwapchainCreateInfoKHR::default()
-            .surface(**surface)
-            .old_swapchain(old_swapchain)
-            .image_format(self.format.format)
-            .image_usage(
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::STORAGE
-                    | vk::ImageUsageFlags::TRANSFER_SRC,
-            )
-            .image_extent(self.extent)
-            .image_color_space(self.format.color_space)
-            .min_image_count(self.images.len() as u32)
-            .image_array_layers(1)
-            .queue_family_indices(&queue_family_index)
-            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-            .present_mode(self.present_mode)
-            .clipped(true);
-        self.inner = unsafe { self.loader.create_swapchain(&swapchain_create_info, None)? };
-
-        unsafe { self.loader.destroy_swapchain(old_swapchain, None) };
-
-        self.images = unsafe { self.loader.get_swapchain_images(self.inner)? };
-        self.images.iter().enumerate().for_each(|(i, &image)| {
-            self.device
-                .name_object(image, &format!("Swapchain Image {i}"))
-        });
-
-        self.views = self
-            .images
-            .iter()
-            .map(|img| self.device.create_2d_view(img, self.format.format, 0))
-            .collect::<VkResult<Vec<_>>>()?;
-        self.views.iter().enumerate().for_each(|(i, &view)| {
-            self.device
-                .name_object(view, &format!("Swapchain View {i}"))
-        });
-
-        Ok(())
+    pub fn get_image(&self, idx: usize) -> vk::Image {
+        self.guts.images[idx]
     }
 
-    pub fn get_current_frame(&self) -> Option<&Frame> {
-        self.frames.get(self.current_frame).and_then(Option::as_ref)
-    }
-    pub fn get_current_frame_mut(&mut self) -> Option<&mut Frame> {
-        self.frames
-            .get_mut(self.current_frame)
-            .and_then(Option::as_mut)
-    }
-    pub fn get_current_image(&self) -> &vk::Image {
-        &self.images[self.current_frame]
-    }
-    pub fn get_current_view(&self) -> &vk::ImageView {
-        &self.views[self.current_frame]
+    pub fn get_view(&self, idx: usize) -> vk::ImageView {
+        self.guts.views[idx]
     }
 
-    pub fn acquire_next_image(&mut self) -> VkResult<FrameGuard> {
-        let acquire_semaphore = self
-            .reclaimed_semaphores
-            .pop()
-            .map_or_else(|| self.device.create_semaphore(), Ok)?;
-        let one_second = Duration::from_secs(1).as_nanos() as u64;
+    pub fn start_frame(&mut self) -> VkResult<FrameGuard> {
+        let sync_idx = self.next_sync_idx;
+        self.next_sync_idx = (self.next_sync_idx + 1) % self.frames.len();
 
-        let image_idx = match unsafe {
-            self.loader.acquire_next_image(
-                self.inner,
-                one_second,
-                acquire_semaphore,
-                vk::Fence::null(),
-            )
-        } {
+        let frame = &self.frames[sync_idx];
+
+        let image_idx = match self
+            .device
+            .acquire_next_image(&self.guts.swapchain, &frame.image_available_semaphore)
+        {
             Ok((idx, false)) => idx as usize,
             Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                self.reclaimed_semaphores.push(acquire_semaphore);
                 return VkResult::Err(vk::Result::ERROR_OUT_OF_DATE_KHR);
             }
             Err(e) => return Err(e),
         };
-        self.current_frame = image_idx;
-        let Some(mut frame) = self.frames[image_idx].take() else {
-            return Err(vk::Result::ERROR_UNKNOWN);
-        };
-        self.reclaimed_semaphores.push(std::mem::replace(
-            &mut frame.image_available_semaphore,
-            acquire_semaphore,
-        ));
 
         self.device
-            .wait_for_fences(&[frame.present_finished], true, one_second)?;
+            .wait_for_fences(&[frame.present_finished], true, u64::MAX)?;
         unsafe { self.device.reset_fences(&[frame.present_finished])? };
 
-        self.device.begin_command_buffer(
-            frame.command_buffer(),
-            vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
-        )?;
+        let cbuff = self.device.allocate_command_buffer()?;
+        self.device
+            .begin_command_buffer(&cbuff, vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)?;
 
         self.device.image_transition(
-            frame.command_buffer(),
-            &self.images[image_idx],
+            &cbuff,
+            &self.get_image(image_idx),
             vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::GENERAL,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         );
 
         Ok(FrameGuard {
-            frame,
-            extent: self.extent,
+            cbuff,
+            sync_idx,
             image_idx,
+            extent: self.extent,
             device: self.device.clone(),
         })
     }
 
-    pub fn submit_image(&mut self, frame_guard: FrameGuard) -> VkResult<()> {
-        let mut frame = frame_guard.frame;
-        let command_buffer = frame.command_buffer();
+    pub fn submit_frame(&mut self, frame_guard: FrameGuard) -> VkResult<()> {
+        let frame = &mut self.frames[frame_guard.sync_idx];
+        let image_idx = frame_guard.image_idx;
 
-        let image_barrier = vk::ImageMemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .dst_stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
-            .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
-            .dst_access_mask(vk::AccessFlags2::empty())
-            .old_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-            .image(self.images[frame_guard.image_idx])
-            .subresource_range(BASE_IMAGE_RANGE);
-        let dependency_info =
-            vk::DependencyInfo::default().image_memory_barriers(slice::from_ref(&image_barrier));
-        self.device
-            .pipeline_barrier(command_buffer, &dependency_info);
+        self.device.image_transition(
+            &frame_guard.cbuff,
+            &self.guts.images[image_idx],
+            vk::ImageLayout::ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+        );
 
-        self.device.end_command_buffer(command_buffer)?;
+        self.device.end_command_buffer(&frame_guard.cbuff)?;
 
         let timeline_semaphore = &self.device.timeline_semaphore;
-        let (_wait_value, signal_value) = dbg!(timeline_semaphore.advance(1));
-        dbg!((frame_guard.image_idx, frame.frame_number));
-        println!();
+        let (_wait_value, signal_value) = timeline_semaphore.advance(1);
+        frame.prev_submit_timeline_value = signal_value;
 
-        let wait_semaphores_info = [
-            vk::SemaphoreSubmitInfo::default()
-                .semaphore(frame.image_available_semaphore)
-                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
-            // vk::SemaphoreSubmitInfo::default()
-            //     .semaphore(**timeline_semaphore)
-            //     .value(wait_value),
-        ];
+        let wait_semaphores_info = [vk::SemaphoreSubmitInfo::default()
+            .semaphore(frame.image_available_semaphore)
+            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
         let signal_semaphores_info = [
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(frame.render_finished_semaphore)
-                .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE),
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(**timeline_semaphore)
-                .stage_mask(vk::PipelineStageFlags2::BOTTOM_OF_PIPE)
+                .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 .value(signal_value),
         ];
-        let cbuf_info = vk::CommandBufferSubmitInfo::default().command_buffer(*command_buffer);
+
+        let cbuf_info = vk::CommandBufferSubmitInfo::default().command_buffer(frame_guard.cbuff);
         let submit_info = vk::SubmitInfo2::default()
             .wait_semaphore_infos(&wait_semaphores_info)
             .signal_semaphore_infos(&signal_semaphores_info)
             .command_buffer_infos(slice::from_ref(&cbuf_info));
-        unsafe {
-            self.device
-                .queue_submit2(self.device.queue, &[submit_info], frame.present_finished)?
-        };
+        self.device
+            .queue_submit(&self.device.queue, &[submit_info], None)?;
 
-        let frame_idx = frame_guard.image_idx as u32;
-        let wait_semaphore = frame.render_finished_semaphore;
-        let present_info = vk::PresentInfoKHR::default()
-            .wait_semaphores(slice::from_ref(&wait_semaphore))
-            .swapchains(slice::from_ref(&self.inner))
-            .image_indices(slice::from_ref(&frame_idx));
+        self.device.destroy_resource(frame_guard.cbuff);
 
-        frame.frame_number += self.images.len() as u64;
-        self.frames[self.current_frame] = Some(frame);
-
-        match unsafe { self.loader.queue_present(self.device.queue, &present_info) } {
+        match self.device.queue_present(
+            &self.device.queue,
+            &self.guts.swapchain,
+            &frame.render_finished_semaphore,
+            &frame.present_finished,
+            image_idx,
+        ) {
             Ok(false) => Ok(()),
             Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 VkResult::Err(vk::Result::ERROR_OUT_OF_DATE_KHR)
@@ -344,17 +327,249 @@ impl Swapchain {
 impl Drop for Swapchain {
     fn drop(&mut self) {
         unsafe {
-            self.frames
-                .iter_mut()
-                .filter_map(|f| f.as_mut())
-                .for_each(|f| f.destroy(&self.device));
-            self.views.iter().for_each(|&view| {
+            self.frames.iter_mut().for_each(|f| {
+                self.device
+                    .destroy_semaphore(f.image_available_semaphore, None);
+                self.device
+                    .destroy_semaphore(f.render_finished_semaphore, None);
+                self.device.destroy_fence(f.present_finished, None);
+            });
+            self.guts.views.iter().for_each(|&view| {
                 self.device.destroy_image_view(view, None);
             });
-            self.reclaimed_semaphores.iter().for_each(|&sema| {
-                self.device.destroy_semaphore(sema, None);
-            });
-            self.loader.destroy_swapchain(self.inner, None);
+            self.device
+                .swapchain_fns
+                .destroy_swapchain(self.guts.swapchain, None);
         }
+    }
+}
+
+struct InnerGuts {
+    swapchain: vk::SwapchainKHR,
+    images: ArrayVec<vk::Image, MAX_IMAGE_CAP>,
+    views: ArrayVec<vk::ImageView, MAX_IMAGE_CAP>,
+}
+
+impl InnerGuts {
+    fn new(
+        device: &Device,
+        surface: &Surface,
+        format: vk::Format,
+        present_mode: vk::PresentModeKHR,
+        extent: vk::Extent2D,
+        num_images: u32,
+        old_swapchain: Option<&Self>,
+    ) -> VkResult<Self> {
+        let format_srgb = match format {
+            vk::Format::R8G8B8A8_UNORM => vk::Format::R8G8B8A8_SRGB,
+            vk::Format::B8G8R8A8_UNORM => vk::Format::B8G8R8A8_SRGB,
+            vk::Format::A8B8G8R8_UNORM_PACK32 => vk::Format::A8B8G8R8_SRGB_PACK32,
+            x => x,
+        };
+
+        let formats = [format, format_srgb];
+        let mut format_list_info = vk::ImageFormatListCreateInfo::default().view_formats(&formats);
+
+        let mut swapchain_info = vk::SwapchainCreateInfoKHR::default()
+            .surface(**surface)
+            .min_image_count(num_images)
+            .image_format(format)
+            .image_color_space(vk::ColorSpaceKHR::SRGB_NONLINEAR)
+            .image_extent(extent)
+            .image_array_layers(1)
+            .image_usage(
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+                    | vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::STORAGE
+                    | vk::ImageUsageFlags::TRANSFER_SRC,
+            )
+            .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+            .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+            .present_mode(present_mode)
+            .clipped(true);
+
+        if let Some(old_swapchain) = old_swapchain {
+            swapchain_info.old_swapchain = old_swapchain.swapchain;
+        }
+
+        if format_srgb != format {
+            swapchain_info = swapchain_info
+                .flags(vk::SwapchainCreateFlagsKHR::MUTABLE_FORMAT)
+                .push_next(&mut format_list_info);
+        }
+
+        let inner = unsafe { device.swapchain_fns.create_swapchain(&swapchain_info, None) }?;
+
+        let images = {
+            let images = unsafe { device.swapchain_fns.get_swapchain_images(inner)? };
+            ArrayVec::from_iter(images)
+        };
+        let views = images
+            .iter()
+            .map(|img| device.create_2d_view(img, format, 0))
+            .collect::<VkResult<ArrayVec<_, MAX_IMAGE_CAP>>>()?;
+
+        for (i, (&image, &view)) in std::iter::zip(&images, &views).enumerate() {
+            device.name_object(image, &format!("Swapchain Image {i}"));
+            device.name_object(view, &format!("Swapchain View {i}"));
+        }
+
+        Ok(InnerGuts {
+            swapchain: inner,
+            images,
+            views,
+        })
+    }
+}
+
+pub struct FrameGuard {
+    sync_idx: usize,
+    pub image_idx: usize,
+    pub cbuff: vk::CommandBuffer,
+
+    pub extent: vk::Extent2D,
+    pub device: Arc<Device>,
+}
+
+impl FrameGuard {
+    pub fn command_buffer(&self) -> &vk::CommandBuffer {
+        &self.cbuff
+    }
+
+    pub fn begin_rendering(
+        &self,
+        image: &vk::Image,
+        view: &vk::ImageView,
+        load_op: vk::AttachmentLoadOp,
+        color: [f32; 4],
+    ) {
+        self.device.image_transition(
+            self.command_buffer(),
+            image,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        );
+
+        let clear_color = vk::ClearValue {
+            color: vk::ClearColorValue { float32: color },
+        };
+        let color_attachment = vk::RenderingAttachmentInfo::default()
+            .image_view(*view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .resolve_image_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+            .load_op(load_op)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(clear_color);
+        let rendering_info = vk::RenderingInfo::default()
+            .render_area(self.extent.into())
+            .layer_count(1)
+            .color_attachments(std::slice::from_ref(&color_attachment));
+        self.device
+            .begin_rendering(self.command_buffer(), &rendering_info);
+
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: self.extent.height as f32,
+            width: self.extent.width as f32,
+            height: -(self.extent.height as f32),
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        self.set_viewports(&[viewport]);
+        self.set_scissors(&[vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: self.extent,
+        }]);
+    }
+
+    pub fn draw(
+        &self,
+        vertex_count: u32,
+        instance_count: u32,
+        first_vertex: u32,
+        first_instance: u32,
+    ) {
+        self.device.draw(
+            self.command_buffer(),
+            vertex_count,
+            instance_count,
+            first_vertex,
+            first_instance,
+        );
+    }
+
+    pub fn draw_indexed(
+        &self,
+        index_count: u32,
+        instance_count: u32,
+        first_index: u32,
+        vertex_offset: i32,
+        first_instance: u32,
+    ) {
+        self.device.draw_indexed(
+            self.command_buffer(),
+            index_count,
+            instance_count,
+            first_index,
+            vertex_offset,
+            first_instance,
+        );
+    }
+
+    pub fn bind_index_buffer(&self, buffer: vk::Buffer, offset: u64) {
+        self.device
+            .bind_index_buffer(self.command_buffer(), buffer, offset);
+    }
+
+    pub fn bind_vertex_buffer(&self, buffer: vk::Buffer) {
+        self.device
+            .bind_vertex_buffer(self.command_buffer(), buffer);
+    }
+
+    pub fn bind_descriptor_sets(
+        &self,
+        bind_point: vk::PipelineBindPoint,
+        pipeline_layout: vk::PipelineLayout,
+        descriptor_sets: &[vk::DescriptorSet],
+    ) {
+        self.device.bind_descriptor_sets(
+            self.command_buffer(),
+            bind_point,
+            pipeline_layout,
+            descriptor_sets,
+        );
+    }
+
+    pub fn bind_push_constants<T>(
+        &self,
+        pipeline_layout: vk::PipelineLayout,
+        stages: vk::ShaderStageFlags,
+        data: &[T],
+    ) {
+        self.device
+            .bind_push_constants(self.command_buffer(), pipeline_layout, stages, data);
+    }
+
+    pub fn set_viewports(&self, viewports: &[vk::Viewport]) {
+        self.device.set_viewports(self.command_buffer(), viewports)
+    }
+
+    pub fn set_scissors(&self, viewports: &[vk::Rect2D]) {
+        self.device.set_scissors(self.command_buffer(), viewports)
+    }
+
+    pub fn bind_pipeline(&self, bind_point: vk::PipelineBindPoint, pipeline: &vk::Pipeline) {
+        self.device
+            .bind_pipeline(self.command_buffer(), bind_point, pipeline)
+    }
+
+    pub fn dispatch(&self, x: u32, y: u32, z: u32) {
+        self.device.dispatch(self.command_buffer(), x, y, z)
+    }
+
+    pub fn end_rendering(&self) {
+        self.device.end_rendering(self.command_buffer());
+        // WARN: barrier col_attachment -> present
     }
 }
