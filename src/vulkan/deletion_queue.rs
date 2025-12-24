@@ -107,7 +107,7 @@ pub struct PendingDeletion {
 
 #[derive(Default)]
 pub struct DeletionQueue {
-    pending_deletions: Vec<PendingDeletion>,
+    pub(super) pending_deletions: Vec<PendingDeletion>,
 }
 
 impl DeletionQueue {

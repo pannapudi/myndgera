@@ -13,7 +13,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ahash = "0.8"
 notify-debouncer-full = "0.6"
 parking_lot = "0.12"
-notify = { version = "8.1", features = ["crossbeam-channel"] }
+notify = { version = "8", features = ["crossbeam-channel"] }
 shaderc = "0.10"
 either = "1.15"
 slotmap = "1.0.7"

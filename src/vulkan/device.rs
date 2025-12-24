@@ -472,14 +472,7 @@ impl Device {
     ) -> Result<u64> {
         let (wait_value, signal_value) = self.simulation_semaphore.advance(1);
 
-        let command_buffer = unsafe {
-            self.allocate_command_buffers(
-                &vk::CommandBufferAllocateInfo::default()
-                    .command_pool(self.command_pool)
-                    .command_buffer_count(1)
-                    .level(vk::CommandBufferLevel::PRIMARY),
-            )?[0]
-        };
+        let command_buffer = self.allocate_command_buffer()?;
         self.name_object(command_buffer, "One Time Command Buffer");
 
         self.begin_command_buffer(
@@ -554,6 +547,14 @@ impl Device {
     pub fn destroy_pending_resources(&self) {
         let mut queue = self.deletion_queue.lock();
         queue.destroy_ready(self);
+
+        unsafe {
+            if queue.pending_deletions.len() > 1000 {
+                warn!("Resource overflow while window is out of focus");
+                self.wait_idle();
+                queue.destroy_all_immediate(&self);
+            };
+        }
     }
 
     #[allow(clippy::too_many_arguments)]

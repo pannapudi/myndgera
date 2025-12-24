@@ -183,12 +183,6 @@ pub struct AppInit<F> {
 
 impl<F> AppInit<F> {
     pub fn reload_shaders(&mut self, path: PathBuf) -> Result<()> {
-        let frame = self.ctx.swapchain.current_frame();
-        self.device.wait_on_semaphore(
-            &self.device.timeline_semaphore,
-            frame.prev_submit_timeline_value,
-        )?;
-
         let state = &mut self.state;
         let resolved = {
             let mapping = state.pipeline_arena.file_watcher.include_mapping.lock();
